@@ -4,12 +4,13 @@ import re, json, time, urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import os
-try:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent / ".env")
-except ImportError:
-    pass
+import os, pathlib as _pl
+_env = _pl.Path(__file__).parent / ".env"
+if _env.exists():
+    for _line in _env.read_text().splitlines():
+        if _line.strip() and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 # ── 設定（從環境變數讀取，或建立 .env 後用 python-dotenv 載入）──
 OPENROUTER_KEY   = os.environ["OPENROUTER_KEY"]
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
