@@ -46,7 +46,7 @@ def http_post_json(url, payload, headers=None, timeout=60):
     h = {"Content-Type": "application/json", **(headers or {})}
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=h, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())
+        return json.loads(r.read()) or {}
 
 def strip_tags(s):
     s = re.sub(r'<br\s*/?>', '\n', s, flags=re.I)
@@ -446,7 +446,7 @@ def notion_req(method, path, payload=None):
     req = urllib.request.Request(url, data=data, headers=h, method=method)
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
-            return json.loads(r.read())
+            return json.loads(r.read()) or {}
     except urllib.error.HTTPError as e:
         print(f"  Notion {method} /{path} {e.code}: {e.read().decode()[:200]}")
         return {}
@@ -473,7 +473,7 @@ def sync_notion(ann, ai, pe, price):
     first_date = min(
         (r["properties"]["首次發現日期"]["date"]["start"]
          for r in results
-         if r.get("properties", {}).get("首次發現日期", {}).get("date", {}).get("start")),
+         if (r.get("properties", {}).get("首次發現日期", {}).get("date") or {}).get("start")),
         default=datetime.now(TZ).date().isoformat()
     )
 
@@ -557,10 +557,13 @@ def main():
         else:
             print(f"  {code} 無詳細頁參數（非 6AM 排程時正常），使用清單頁說明")
 
-    # 詳細頁已補全說明後，再做 EPS 過濾
-    eps_re = re.compile(r'每股盈餘[^\n。，]*\d+\.\d+')
-    matched = [a for a in watchlist_anns if eps_re.search(a.get('說明', ''))]
-    print(f"  符合 EPS 條件：{len(matched)} 筆")
+    # 篩選：說明含「每股盈餘」且符合條款為 51 或 53 款
+    matched = [
+        a for a in watchlist_anns
+        if "每股盈餘" in a.get("說明", "")
+        and ("51" in a.get("符合條款", "") or "53" in a.get("符合條款", ""))
+    ]
+    print(f"  符合條件：{len(matched)} 筆")
 
     if not matched:
         send_telegram(f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有符合訊號的公告")
