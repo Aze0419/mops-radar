@@ -150,9 +150,8 @@ def fetch_onclick_params():
     for m in pattern.finditer(html):
         seq_no, spoke_time, spoke_date, company_id = m.groups()
         company_id = company_id.strip()
-        key = (company_id, spoke_date)  # 同公司同日可能有多筆，取第一筆
-        if key not in params:
-            params[key] = (seq_no, spoke_time, spoke_date)
+        key = (company_id, spoke_date, spoke_time)  # 三元組：同日多筆各自保留
+        params[key] = (seq_no, spoke_time, spoke_date)
     print(f"  t05sr01_1 onclick 參數：{len(params)} 筆")
     return params
 
@@ -530,7 +529,7 @@ def main():
         code = ann['公司代號']
         # h2 是 8 位日期（YYYYMMDD），用來和 onclick 的 SPOKE_DATE 對應
         spoke_date8 = re.sub(r'\D', '', ann.get('發言日期', ''))
-        key = (code, spoke_date8)
+        key = (code, spoke_date8, ann.get('_spoke_time', ''))
         if key in onclick_params:
             seq_no, spoke_time, spoke_date = onclick_params[key]
             ann['_seq_no']     = seq_no
