@@ -189,7 +189,7 @@ def fetch_prices():
             price = (r[2] if len(r) > 2 else '').strip()
             if code and price:
                 try:
-                    prices[code] = float(price)
+                    prices[code] = float(price.replace(',', ''))
                 except ValueError:
                     pass
         if prices:
