@@ -8,7 +8,7 @@ import os, pathlib as _pl
 _env = _pl.Path(__file__).parent / ".env"
 if _env.exists():
     for _line in _env.read_text().splitlines():
-        if _line.strip() and not _line.startswith("#") and "=" in _line:
+        if _line.strip() and not _line.strip().startswith("#") and "=" in _line:
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip())
 # ── 設定（從環境變數讀取，或建立 .env 後用 python-dotenv 載入）──
@@ -61,12 +61,19 @@ def yyyymmdd_to_iso(s):
     m = re.match(r'^(\d{4})(\d{2})(\d{2})$', s or '')
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ''
 
-# ── 1. 讀取 Google Sheet 自選股清單 ───────────────────────────────
+# ── 1. 讀取 Google Sheet（快取，避免 read_watchlist 和 fetch_prices 各開一次連線）
+_sheet_rows_cache = None
+
+def _get_sheet_rows():
+    global _sheet_rows_cache
+    if _sheet_rows_cache is None:
+        import gspread
+        gc = gspread.service_account(filename=SA_KEY_FILE)
+        _sheet_rows_cache = gc.open_by_key(GSHEET_ID).sheet1.get_all_values()
+    return _sheet_rows_cache
+
 def read_watchlist():
-    import gspread
-    gc = gspread.service_account(filename=SA_KEY_FILE)
-    ws = gc.open_by_key(GSHEET_ID).sheet1
-    rows = ws.get_all_values()
+    rows = _get_sheet_rows()
     watchlist = {}
     for r in rows[1:]:
         code = (r[0] if len(r) > 0 else '').strip()
@@ -181,10 +188,7 @@ def fetch_detail(company_id, spoke_time, spoke_date, seq_no):
 def fetch_prices():
     # 優先：從 Google Sheet 讀（與 V5.05 DataTable 同邏輯）
     try:
-        import gspread
-        gc = gspread.service_account(filename=SA_KEY_FILE)
-        ws = gc.open_by_key(GSHEET_ID).sheet1
-        rows = ws.get_all_values()
+        rows = _get_sheet_rows()
         prices = {}
         for r in rows[1:]:
             code  = (r[0] if len(r) > 0 else '').strip()
