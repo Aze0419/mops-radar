@@ -1,0 +1,78 @@
+{
+  "jobs": [
+    {
+      "id": "hot-news-daily",
+      "name": "Hot News Daily",
+      "prompt": "run hot-news skill",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 8 * * *",
+        "display": "0 8 * * *"
+      },
+      "skills": [
+        "hot-news"
+      ],
+      "status": "active",
+      "next_run_at": "2026-06-27T08:00:00+08:00",
+      "fire_claim": null,
+      "last_run_at": "2026-06-26T11:28:15.281442+08:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "state": "scheduled",
+      "deliver": "telegram:8261330955",
+      "skill": "hot-news"
+    },
+    {
+      "id": "mops-radar-daily",
+      "name": "MOPS \u98c6\u80a1\u96f7\u9054",
+      "prompt": "run mops-radar skill",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 6 * * *",
+        "display": "0 6 * * *"
+      },
+      "skills": [
+        "mops-radar"
+      ],
+      "status": "active",
+      "next_run_at": "2026-06-27T06:00:00+08:00",
+      "fire_claim": null,
+      "last_run_at": "2026-06-26T11:41:12.123303+08:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "state": "scheduled",
+      "deliver": "local",
+      "skill": "mops-radar",
+      "script": "mops-radar.sh",
+      "no_agent": true
+    },
+    {
+      "id": "fetch-prices-daily",
+      "name": "\u6293\u6700\u65b0\u6536\u76e4\u50f9",
+      "prompt": "run fetch-prices skill",
+      "schedule": {
+        "kind": "cron",
+        "expr": "15 14 * * 1-5",
+        "display": "15 14 * * 1-5"
+      },
+      "skills": [
+        "fetch-prices"
+      ],
+      "status": "active",
+      "next_run_at": "2026-06-26T14:15:00+08:00",
+      "fire_claim": null,
+      "last_run_at": "2026-06-26T11:12:36.076751+08:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "state": "scheduled",
+      "deliver": "local",
+      "skill": "fetch-prices",
+      "script": "fetch-prices.sh",
+      "no_agent": true
+    }
+  ],
+  "updated_at": "2026-06-26T11:42:40.919183+08:00"
+}
