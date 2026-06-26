@@ -91,6 +91,15 @@ class TestParseAnnouncementList(unittest.TestCase):
         self.assertEqual(ann['_spoke_time'], '120000')
         self.assertEqual(ann['_spoke_date'], '20250625')
 
+    def test_non_data_form_prefix_ignored(self):
+        # 搜尋/導覽 form 在前（無 h-input），資料 form 仍能正確解析
+        search_form = '<form><input type="text" name="keyword"></form>'
+        data_form = self._make_form(0, '3167', '大量', '20250625', '070004',
+                                    '公告EPS', '51', '20250620', '每股盈餘1.83元')
+        out = parse_announcement_list(search_form + data_form)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]['公司代號'], '3167')
+
     def test_multiple_forms(self):
         f1 = self._make_form(0,  '2330', '台積電', '20250625', '070000', '主旨1', '51', '20250620', '說明1')
         f2 = self._make_form(10, '2454', '聯發科', '20250625', '080000', '主旨2', '51', '20250620', '說明2')

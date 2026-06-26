@@ -91,12 +91,14 @@ def fetch_announcements(roc_year, month, day):
 def parse_announcement_list(html):
     out = []
     forms = re.findall(r'<form\b[^>]*>[\s\S]*?</form>', html, re.I)
-    for idx, form in enumerate(forms):
+    for form in forms:
         h = {}
         for m in re.finditer(r'<input[^>]*name=["\']h(\d+)["\'][^>]*value=["\']([^"\']*)["\']', form, re.I):
             h[int(m.group(1))] = m.group(2)
-        base = idx * 10
-        get = lambda n: h.get(base + n, '')
+        if not h:
+            continue  # 搜尋/導覽 form，無資料欄位
+        base = (min(h.keys()) // 10) * 10  # 從實際 h-key 推導 base，不依賴 form 索引
+        get = lambda n, _b=base: h.get(_b + n, '')
         code    = get(1)
         name    = get(0)
         date8   = get(2)
