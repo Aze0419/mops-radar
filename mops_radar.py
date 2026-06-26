@@ -512,22 +512,21 @@ def main():
     announcements = fetch_announcements(roc_year, month, day)
     print(f"  公告總數：{len(announcements)} 筆")
 
-    eps_re = re.compile(r'每股盈餘[^\n。，]*\d+\.\d+')
-    matched = [a for a in announcements
-               if eps_re.search(a.get('說明', '')) and a['公司代號'] in watchlist]
-    print(f"  符合條件：{len(matched)} 筆")
+    # 先只過濾自選股，詳細頁抓完後再用 eps_re 二次過濾
+    watchlist_anns = [a for a in announcements if a['公司代號'] in watchlist]
+    print(f"  自選股公告：{len(watchlist_anns)} 筆")
 
-    if not matched:
-        send_telegram(f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有符合訊號的公告")
+    if not watchlist_anns:
+        send_telegram(f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有自選股公告")
         return
 
     # 從 t05sr01_1 取 onclick 參數（SEQ_NO 等），供詳細頁使用
     print("取得公告 onclick 參數...")
     onclick_params = fetch_onclick_params()
 
-    # 抓詳細頁，取得完整「說明」
+    # 抓詳細頁，取得完整「說明」（在 EPS 過濾前執行，避免漏掉 EPS 只在詳細頁的公告）
     print("抓取公告詳細內容...")
-    for ann in matched:
+    for ann in watchlist_anns:
         code = ann['公司代號']
         # h2 是 8 位日期（YYYYMMDD），用來和 onclick 的 SPOKE_DATE 對應
         spoke_date8 = re.sub(r'\D', '', ann.get('發言日期', ''))
@@ -546,6 +545,15 @@ def main():
             time.sleep(2)
         else:
             print(f"  {code} 無詳細頁參數（非 6AM 排程時正常），使用清單頁說明")
+
+    # 詳細頁已補全說明後，再做 EPS 過濾
+    eps_re = re.compile(r'每股盈餘[^\n。，]*\d+\.\d+')
+    matched = [a for a in watchlist_anns if eps_re.search(a.get('說明', ''))]
+    print(f"  符合 EPS 條件：{len(matched)} 筆")
+
+    if not matched:
+        send_telegram(f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有符合訊號的公告")
+        return
 
     print("抓取股價...")
     prices = fetch_prices()
