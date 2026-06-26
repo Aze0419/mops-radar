@@ -176,8 +176,30 @@ def fetch_detail(company_id, spoke_time, spoke_date, seq_no):
             time.sleep(3)
     return ''
 
-# ── 3. 取收盤價（優先讀本日快取，否則 fallback OpenAPI）──────────
+# ── 3. 取收盤價（優先讀 Google Sheet C欄，fallback prices.json）──
 def fetch_prices():
+    # 優先：從 Google Sheet 讀（與 V5.05 DataTable 同邏輯）
+    try:
+        import gspread
+        gc = gspread.service_account(filename=SA_KEY_FILE)
+        ws = gc.open_by_key(GSHEET_ID).sheet1
+        rows = ws.get_all_values()
+        prices = {}
+        for r in rows[1:]:
+            code  = (r[0] if len(r) > 0 else '').strip()
+            price = (r[2] if len(r) > 2 else '').strip()
+            if code and price:
+                try:
+                    prices[code] = float(price)
+                except ValueError:
+                    pass
+        if prices:
+            print(f"  讀 Google Sheet 股價：{len(prices)} 筆")
+            return prices
+    except Exception as e:
+        print(f"  Google Sheet 股價讀取失敗：{e}，改用 prices.json")
+
+    # Fallback：prices.json
     from pathlib import Path
     cache_file = Path(__file__).parent / "prices.json"
     if cache_file.exists():
@@ -187,20 +209,7 @@ def fetch_prices():
         if prices:
             print(f"  讀快取股價：{date}，共 {len(prices)} 筆")
             return prices
-    prices = {}
-    try:
-        with urllib.request.urlopen(
-            "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=15
-        ) as r:
-            for d in json.loads(r.read()):
-                code = (d.get('Code') or '').strip()
-                p = float((d.get('ClosingPrice') or '0').replace(',', ''))
-                if code and p > 0:
-                    prices[code] = p
-        print(f"  OpenAPI fallback：{len(prices)} 筆")
-    except Exception as e:
-        print(f"  TWSE 股價 API 失敗: {e}")
-    return prices
+    return {}
 
 # ── 4. 預算本益比 ─────────────────────────────────────────────────
 def _parse_num(s):
