@@ -37,6 +37,14 @@ class TestCalcPe(unittest.TestCase):
         self.assertIsNone(r['pre_pe'])
         self.assertEqual(r['pre_pe_note'], '無EPS資料')
 
+    def test_zero_eps_not_treated_as_missing(self):
+        # EPS=0.00（損益兩平）不應被 falsy 判斷誤認為「無EPS資料」
+        detail = "每股盈餘 0.00元"
+        r = calc_pe(detail, 100.0)
+        self.assertEqual(r['pre_monthly_eps'], 0.0)
+        self.assertIsNone(r['pre_pe'])  # pe=None（0.0 無法算倍率）
+        self.assertEqual(r['pre_pe_note'], '虧損')  # annual=0.0，判為虧損邊界
+
     def test_revenue_extraction(self):
         detail = "營業收入 773百萬，年增率 146.18%\n每股盈餘 1.68元"
         r = calc_pe(detail, 672.0)

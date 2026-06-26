@@ -251,9 +251,9 @@ def calc_pe(detail, price):
     if eps is None:
         eps, mult, src = q_eps, 4, '季'
     annual = round(eps * mult, 2) if eps is not None else None
-    pe = round(price / annual, 2) if (annual and annual > 0 and price > 0) else None
+    pe = round(price / annual, 2) if (annual is not None and annual > 0 and price > 0) else None
     pe_note = (f"{price} ÷ {annual} = {pe}倍" if pe else
-               ('虧損' if annual and annual <= 0 else
+               ('虧損' if annual is not None and annual <= 0 else
                 ('無股價資料' if not price else '無EPS資料')))
     return {
         'pre_monthly_eps':         m_eps,
@@ -396,9 +396,9 @@ def analyze(ann, price, pe):
     user_msg = (
         f"請分析：\n股票：{ann['公司名稱']}（{ann['公司代號']}）\n股價：{price}元\n\n"
         f"【系統預算值】\n"
-        f"單月EPS：{pe['pre_monthly_eps'] or '無'}元｜年增率：{pe['pre_monthly_eps_yoy'] or '無'}%\n"
-        f"單月營收：{pe['pre_monthly_revenue'] or '無'}百萬｜年增率：{pe['pre_monthly_revenue_yoy'] or '無'}%\n"
-        f"預估全年EPS：{pe['pre_annual_eps'] or '無'}元\n"
+        f"單月EPS：{pe['pre_monthly_eps'] if pe['pre_monthly_eps'] is not None else '無'}元｜年增率：{pe['pre_monthly_eps_yoy'] if pe['pre_monthly_eps_yoy'] is not None else '無'}%\n"
+        f"單月營收：{pe['pre_monthly_revenue'] if pe['pre_monthly_revenue'] is not None else '無'}百萬｜年增率：{pe['pre_monthly_revenue_yoy'] if pe['pre_monthly_revenue_yoy'] is not None else '無'}%\n"
+        f"預估全年EPS：{pe['pre_annual_eps'] if pe['pre_annual_eps'] is not None else '無'}元\n"
         f"預估本益比：{pe['pre_pe_note']}\n\n"
         f"公告內容：\n{ann['說明'][:3000]}"
     )
