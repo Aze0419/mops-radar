@@ -108,8 +108,8 @@ def parse_announcement_list(html):
 
         # 抓 onclick 參數，供後續抓詳細頁
         onclick_m = re.search(
-            r"SEQ_NO\.value='(\d+)'[^;]*;[^;]*SPOKE_TIME\.value='(\d+)'[^;]*;[^;]*SPOKE_DATE\.value='(\d+)'",
-            form, re.I
+            r"SEQ_NO\.value='(\d+)'.*?SPOKE_TIME\.value='(\d+)'.*?SPOKE_DATE\.value='(\d+)'",
+            form, re.I | re.DOTALL
         )
         seq_no     = onclick_m.group(1) if onclick_m else ''
         spoke_time = onclick_m.group(2) if onclick_m else ''
@@ -142,8 +142,9 @@ def fetch_onclick_params():
         print(f"  t05sr01_1 取得失敗: {e}")
         return {}
     pattern = re.compile(
-        r"SEQ_NO\.value='(\d+)'[^;]*;[^;]*SPOKE_TIME\.value='(\d+)'[^;]*;"
-        r"[^;]*SPOKE_DATE\.value='(\d+)'[^;]*;[^;]*COMPANY_ID\.value='([^']+)'"
+        r"SEQ_NO\.value='(\d+)'.*?SPOKE_TIME\.value='(\d+)'.*?"
+        r"SPOKE_DATE\.value='(\d+)'.*?COMPANY_ID\.value='([^']+)'",
+        re.DOTALL
     )
     params = {}
     for m in pattern.finditer(html):
