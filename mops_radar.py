@@ -417,7 +417,13 @@ def analyze(ann, price, pe):
 # ── 6. Telegram ───────────────────────────────────────────────────
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
+    while text:
+        if len(text) <= 4000:
+            chunk, text = text, ''
+        else:
+            cut = text.rfind('\n', 0, 4000)
+            cut = cut if cut != -1 else 4000  # 找不到換行才硬切
+            chunk, text = text[:cut], text[cut+1:]
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"}
         req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                      headers={"Content-Type": "application/json"})
