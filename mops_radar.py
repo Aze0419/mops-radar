@@ -76,8 +76,8 @@ def read_watchlist():
     rows = _get_sheet_rows()
     watchlist = {}
     for r in rows[1:]:
-        code = (r[0] if len(r) > 0 else '').strip()
-        name = (r[1] if len(r) > 1 else '').strip()
+        code = r[0].strip() if r else ''
+        name = r[1].strip() if len(r) > 1 else ''
         if code:
             watchlist[code] = name
     print(f"  自選股清單：{len(watchlist)} 檔")
@@ -191,8 +191,8 @@ def fetch_prices():
         rows = _get_sheet_rows()
         prices = {}
         for r in rows[1:]:
-            code  = (r[0] if len(r) > 0 else '').strip()
-            price = (r[2] if len(r) > 2 else '').strip()
+            code  = r[0].strip() if r else ''
+            price = r[2].strip() if len(r) > 2 else ''
             if code and price:
                 try:
                     prices[code] = float(price.replace(',', ''))
@@ -223,7 +223,7 @@ def _parse_num(s):
     s = re.sub(r'[（()）,]', '', s)
     try:
         return (-1 if neg else 1) * float(s)
-    except:
+    except (ValueError, TypeError):
         return None
 
 def calc_pe(detail, price):
@@ -398,12 +398,13 @@ JSON 欄位定義：
 若缺少關鍵數據（如 EPS），在 display_text 中標示缺資料，對應數值欄位填 null。"""
 
 def analyze(ann, price, pe):
+    v = lambda x: x if x is not None else '無'
     user_msg = (
         f"請分析：\n股票：{ann['公司名稱']}（{ann['公司代號']}）\n股價：{price}元\n\n"
         f"【系統預算值】\n"
-        f"單月EPS：{pe['pre_monthly_eps'] if pe['pre_monthly_eps'] is not None else '無'}元｜年增率：{pe['pre_monthly_eps_yoy'] if pe['pre_monthly_eps_yoy'] is not None else '無'}%\n"
-        f"單月營收：{pe['pre_monthly_revenue'] if pe['pre_monthly_revenue'] is not None else '無'}百萬｜年增率：{pe['pre_monthly_revenue_yoy'] if pe['pre_monthly_revenue_yoy'] is not None else '無'}%\n"
-        f"預估全年EPS：{pe['pre_annual_eps'] if pe['pre_annual_eps'] is not None else '無'}元\n"
+        f"單月EPS：{v(pe['pre_monthly_eps'])}元｜年增率：{v(pe['pre_monthly_eps_yoy'])}%\n"
+        f"單月營收：{v(pe['pre_monthly_revenue'])}百萬｜年增率：{v(pe['pre_monthly_revenue_yoy'])}%\n"
+        f"預估全年EPS：{v(pe['pre_annual_eps'])}元\n"
         f"預估本益比：{pe['pre_pe_note']}\n\n"
         f"公告內容：\n{ann['說明'][:3000]}"
     )
@@ -539,8 +540,7 @@ def main():
     print("抓取公告詳細內容...")
     for ann in watchlist_anns:
         code = ann['公司代號']
-        # h2 是 8 位日期（YYYYMMDD），用來和 onclick 的 SPOKE_DATE 對應
-        spoke_date8 = re.sub(r'\D', '', ann.get('發言日期', ''))
+        spoke_date8 = ann.get('發言日期', '').replace('-', '')
         key = (code, spoke_date8, ann.get('_spoke_time', ''))
         if key in onclick_params:
             seq_no, spoke_time, spoke_date = onclick_params[key]
