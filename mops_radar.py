@@ -253,7 +253,8 @@ def calc_pe(detail, price):
     annual = round(eps * mult, 2) if eps is not None else None
     pe = round(price / annual, 2) if (annual and annual > 0 and price > 0) else None
     pe_note = (f"{price} ÷ {annual} = {pe}倍" if pe else
-               ('虧損' if annual and annual <= 0 else '無EPS資料'))
+               ('虧損' if annual and annual <= 0 else
+                ('無股價資料' if not price else '無EPS資料')))
     return {
         'pre_monthly_eps':         m_eps,
         'pre_monthly_eps_yoy':     m_yoy,
