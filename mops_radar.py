@@ -167,11 +167,10 @@ def fetch_detail(company_id, spoke_time, spoke_date, seq_no):
             m = re.search(r'<th[^>]*>說明</th>\s*<td[^>]*colspan=[\'"]?5[\'"]?[^>]*>([\s\S]*?)</td>', html, re.I)
             if m:
                 return strip_tags(m.group(1))
-            # fallback：找 <pre> 裡的說明
             m2 = re.search(r'<pre[^>]*>([\s\S]*?)</pre>', html, re.I)
             if m2:
                 return strip_tags(m2.group(1))
-            return ''
+            # HTML 載入但 regex 未中，繼續下一次嘗試（不 sleep）
         except Exception as e:
             print(f"    詳細頁 retry {attempt+1}/3：{e}")
             time.sleep(3)
