@@ -132,7 +132,30 @@ def parse_announcement_list(html):
             })
     return out
 
-# ── 2b. 抓公告詳細頁，取得完整「說明」────────────────────────────
+# ── 2b. 從 t05sr01_1 取得最新公告的 onclick 參數（SEQ_NO 等）─────
+def fetch_onclick_params():
+    """GET t05sr01_1（無日期參數）→ 解析 onclick SEQ_NO/SPOKE_TIME/SPOKE_DATE/COMPANY_ID。
+    早上 6 AM 時此頁面顯示的是昨日公告，與 fetch_announcements 查的日期吻合。"""
+    try:
+        html = http_get("https://mopsov.twse.com.tw/mops/web/t05sr01_1", timeout=30)
+    except Exception as e:
+        print(f"  t05sr01_1 取得失敗: {e}")
+        return {}
+    pattern = re.compile(
+        r"SEQ_NO\.value='(\d+)'[^;]*;[^;]*SPOKE_TIME\.value='(\d+)'[^;]*;"
+        r"[^;]*SPOKE_DATE\.value='(\d+)'[^;]*;[^;]*COMPANY_ID\.value='([^']+)'"
+    )
+    params = {}
+    for m in pattern.finditer(html):
+        seq_no, spoke_time, spoke_date, company_id = m.groups()
+        company_id = company_id.strip()
+        key = (company_id, spoke_date)  # 同公司同日可能有多筆，取第一筆
+        if key not in params:
+            params[key] = (seq_no, spoke_time, spoke_date)
+    print(f"  t05sr01_1 onclick 參數：{len(params)} 筆")
+    return params
+
+# ── 2c. 抓公告詳細頁，取得完整「說明」────────────────────────────
 def fetch_detail(company_id, spoke_time, spoke_date, seq_no):
     url = (f"https://mopsov.twse.com.tw/mops/web/ajax_t05sr01_1"
            f"?firstin=true&stp=1&step=1"
@@ -386,16 +409,31 @@ def main():
         send_telegram(f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有符合訊號的公告")
         return
 
+    # 從 t05sr01_1 取 onclick 參數（SEQ_NO 等），供詳細頁使用
+    print("取得公告 onclick 參數...")
+    onclick_params = fetch_onclick_params()
+
     # 抓詳細頁，取得完整「說明」
     print("抓取公告詳細內容...")
     for ann in matched:
+        code = ann['公司代號']
+        # h2 是 8 位日期（YYYYMMDD），用來和 onclick 的 SPOKE_DATE 對應
+        spoke_date8 = re.sub(r'\D', '', ann.get('發言日期', ''))
+        key = (code, spoke_date8)
+        if key in onclick_params:
+            seq_no, spoke_time, spoke_date = onclick_params[key]
+            ann['_seq_no']     = seq_no
+            ann['_spoke_time'] = spoke_time
+            ann['_spoke_date'] = spoke_date
         if ann.get('_seq_no') and ann.get('_spoke_time') and ann.get('_spoke_date'):
-            print(f"  抓詳細頁：{ann['公司代號']} {ann['主旨'][:30]}")
-            detail = fetch_detail(ann['公司代號'], ann['_spoke_time'], ann['_spoke_date'], ann['_seq_no'])
+            print(f"  抓詳細頁：{code} {ann['主旨'][:30]}")
+            detail = fetch_detail(code, ann['_spoke_time'], ann['_spoke_date'], ann['_seq_no'])
             if detail:
                 ann['說明'] = detail
                 print(f"    說明長度：{len(detail)} 字")
-        time.sleep(2)
+            time.sleep(2)
+        else:
+            print(f"  {code} 無詳細頁參數（非 6AM 排程時正常），使用清單頁說明")
 
     print("抓取股價...")
     prices = fetch_prices()
