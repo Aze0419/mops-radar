@@ -61,6 +61,28 @@ def yyyymmdd_to_iso(s):
     m = re.match(r'^(\d{4})(\d{2})(\d{2})$', s or '')
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ''
 
+
+# ── Dashboard Excel cache ───────────────────────────────────────────────────
+from pathlib import Path as _Path
+_DASHBOARD_PATH = _Path.home() / "投資系統" / "dashboard_latest.xlsx"
+_dashboard_cache = {"df": None, "mtime": 0.0}
+
+def _get_dashboard_row(code):
+    try:
+        mtime = _DASHBOARD_PATH.stat().st_mtime if _DASHBOARD_PATH.exists() else 0.0
+        if mtime and mtime != _dashboard_cache["mtime"]:
+            import pandas as pd
+            _dashboard_cache["df"] = pd.read_excel(_DASHBOARD_PATH, dtype={"股號": str})
+            _dashboard_cache["mtime"] = mtime
+    except Exception:
+        pass
+    df = _dashboard_cache.get("df")
+    if df is None:
+        return None
+    row = df[df["股號"] == str(code)]
+    return row.iloc[0].to_dict() if not row.empty else None
+
+
 # ── 1. 讀取 Google Sheet（快取，避免 read_watchlist 和 fetch_prices 各開一次連線）
 _sheet_rows_cache = None
 
@@ -397,16 +419,31 @@ JSON 欄位定義：
 
 若缺少關鍵數據（如 EPS），在 display_text 中標示缺資料，對應數值欄位填 null。"""
 
-def analyze(ann, price, pe):
+def analyze(ann, price, pe, dashboard=None):
     v = lambda x: x if x is not None else '無'
+    def dv(key):
+        if dashboard is None:
+            return '無'
+        import math
+        val = dashboard.get(key)
+        return '無' if (val is None or (isinstance(val, float) and math.isnan(val))) else val
+    NL = chr(10)
+    dash_block = (
+        NL + "【選股儀表板補充資料（請直接使用，毋需另行搜尋題材）】" + NL
+        + "題材：" + str(dv('題材')) + NL
+        + "毛利率：" + str(dv('毛利率')) + "%" + NL
+        + "近4季ROE：" + str(dv('近4季ROE%')) + "%" + NL
+        + "去年同期EPS：" + str(dv('去年同期EPS')) + "元" + NL
+    ) if dashboard else ''
     user_msg = (
         f"請分析：\n股票：{ann['公司名稱']}（{ann['公司代號']}）\n股價：{price}元\n\n"
-        f"【系統預算值】\n"
+        f"【系統預算値】\n"
         f"單月EPS：{v(pe['pre_monthly_eps'])}元｜年增率：{v(pe['pre_monthly_eps_yoy'])}%\n"
         f"單月營收：{v(pe['pre_monthly_revenue'])}百萬｜年增率：{v(pe['pre_monthly_revenue_yoy'])}%\n"
         f"預估全年EPS：{v(pe['pre_annual_eps'])}元\n"
-        f"預估本益比：{pe['pre_pe_note']}\n\n"
-        f"公告內容：\n{ann['說明'][:3000]}"
+        f"預估本益比：{pe['pre_pe_note']}"
+        + dash_block
+        + f"\n公告內容：\n{ann['說明'][:3000]}"
     )
     result = http_post_json(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -579,11 +616,12 @@ def main():
         print(f"\n處理 {code} {ann['公司名稱']}（股價 {price}）")
 
         pe = calc_pe(ann['說明'], price)
+        dashboard = _get_dashboard_row(code)
         print(f"  預估本益比：{pe['pre_pe_note']}")
 
         print("  AI 分析中...")
         try:
-            ai = analyze(ann, price, pe)
+            ai = analyze(ann, price, pe, dashboard)
         except Exception as e:
             print(f"  AI 失敗：{e}")
             ai = {"display_text": f"AI分析失敗：{e}", "ai_rating": "🟡 一般觀望"}
