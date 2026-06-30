@@ -534,7 +534,7 @@ def sync_gsheet(ann, ai, pe, price):
         first_date,
         ann['發言日期'] or '',
     ]
-    ws.append_row(new_row, value_input_option='RAW')
+    ws.insert_row(new_row, 2, value_input_option='RAW')
 
 # ── 主程式 ────────────────────────────────────────────────────────
 def main():
