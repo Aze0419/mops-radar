@@ -475,8 +475,7 @@ def send_telegram(text):
 
 # ── 7. Google Sheet 同步 ─────────────────────────────────────────
 RADAR_HEADERS = [
-    "股票代號", "股票名稱", "最新股價", "AI評級燈號", "AI完整分析",
-    "最新公告主旨", "最新公告說明", "符合條款", "公告次數",
+    "股票代號", "股票名稱", "最新股價", "AI評級燈號", "公告次數",
     "最新單月EPS", "EPS年增率", "最新單月營收", "營收年增率", "預估全年EPS",
     "評分理由", "產業熱度與風險", "是否最新", "首次發現日期", "最新公告日期",
 ]
@@ -523,10 +522,6 @@ def sync_gsheet(ann, ai, pe, price):
         ann['公司名稱'],
         v(price),
         ai.get('ai_rating', '🟡 一般觀望'),
-        ai.get('display_text', ''),
-        ann['主旨'],
-        ann['說明'][:50000],
-        ann['符合條款'],
         max_count + 1,
         v(ai.get('monthly_eps')),
         v(ai.get('eps_yoy')),
