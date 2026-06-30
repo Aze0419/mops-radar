@@ -513,8 +513,8 @@ def sync_gsheet(ann, ai, pe, price):
 
     # 把舊的「是否最新」改為 FALSE
     for row_num, r in code_rows:
-        if len(r) > 16 and r[16] == 'TRUE':
-            ws.update_cell(row_num, 17, 'FALSE')
+        if len(r) > 12 and r[12] == '✅':
+            ws.update_cell(row_num, 13, '❌')
 
     def v(x): return x if x is not None else ''
     new_row = [
@@ -530,7 +530,7 @@ def sync_gsheet(ann, ai, pe, price):
         v(pe.get('pre_annual_eps')),
         ai.get('rating_reason', ''),
         ai.get('industry_risk', ''),
-        'TRUE',
+        '✅',
         first_date,
         ann['發言日期'] or '',
     ]
