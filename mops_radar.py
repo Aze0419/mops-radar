@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MOPS 飆股雷達：每日監控重大公告 + AI分析 → Telegram + Notion"""
+"""MOPS 飆股雷達：每日監控重大公告 + AI分析 → Telegram + Google Sheet"""
 import re, json, time, urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -15,9 +15,9 @@ if _env.exists():
 OPENROUTER_KEY   = os.environ["OPENROUTER_KEY"]
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-NOTION_TOKEN     = os.environ["NOTION_TOKEN"]
-NOTION_DB_ID     = os.environ["NOTION_DB_ID"]
 GSHEET_ID        = os.environ["GSHEET_ID"]
+RADAR_SHEET_ID   = os.environ.get("RADAR_SHEET_ID", "1UulUtCjGbBUk_36xCK7TuRSrEvBFCCr7okKWBlJBvuc")
+RADAR_SHEET_NAME = "公告紀錄"
 SA_KEY_FILE      = os.environ.get("SA_KEY_FILE", "/Users/iroman/ai-hedge-fund-tw/google-sa.json")
 TZ               = ZoneInfo("Asia/Taipei")
 AI_MODEL         = "google/gemini-3.1-flash-lite-preview"
@@ -473,74 +473,73 @@ def send_telegram(text):
                                      headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=10)
 
-# ── 7. Notion 同步 ────────────────────────────────────────────────
-def notion_req(method, path, payload=None):
-    url = f"https://api.notion.com/v1/{path}"
-    h = {"Authorization": f"Bearer {NOTION_TOKEN}",
-         "Notion-Version": "2022-06-28",
-         "Content-Type": "application/json"}
-    data = json.dumps(payload).encode() if payload else None
-    req = urllib.request.Request(url, data=data, headers=h, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            return json.loads(r.read()) or {}
-    except urllib.error.HTTPError as e:
-        print(f"  Notion {method} /{path} {e.code}: {e.read().decode()[:200]}")
-        return {}
+# ── 7. Google Sheet 同步 ─────────────────────────────────────────
+RADAR_HEADERS = [
+    "股票代號", "股票名稱", "最新股價", "AI評級燈號", "AI完整分析",
+    "最新公告主旨", "最新公告說明", "符合條款", "公告次數",
+    "最新單月EPS", "EPS年增率", "最新單月營收", "營收年增率", "預估全年EPS",
+    "評分理由", "產業熱度與風險", "是否最新", "首次發現日期", "最新公告日期",
+]
+_radar_ws = None
 
-def rt(text):
-    return [{"type": "text", "text": {"content": str(text)[:2000]}}]
+def _get_radar_ws():
+    global _radar_ws
+    if _radar_ws is None:
+        import gspread
+        gc = gspread.service_account(filename=SA_KEY_FILE)
+        ss = gc.open_by_key(RADAR_SHEET_ID)
+        try:
+            _radar_ws = ss.worksheet(RADAR_SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            _radar_ws = ss.add_worksheet(RADAR_SHEET_NAME, rows=1000, cols=len(RADAR_HEADERS))
+            _radar_ws.append_row(RADAR_HEADERS)
+    return _radar_ws
 
-def sync_notion(ann, ai, pe, price):
+def sync_gsheet(ann, ai, pe, price):
+    ws = _get_radar_ws()
+    all_rows = ws.get_all_values()
     code = ann['公司代號']
-    resp = notion_req("POST", f"databases/{NOTION_DB_ID}/query", {
-        "filter": {"property": "股票代號", "title": {"equals": code}},
-        "sorts": [{"property": "公告次數", "direction": "descending"}],
-        "page_size": 5
-    })
-    results = resp.get("results", [])
-    max_count = max(
-        (r.get("properties", {}).get("公告次數", {}).get("number", 0) or 0 for r in results),
-        default=0
-    )
-    new_count = max_count + 1
-    latest_yes = next(
-        (r for r in results if r.get("properties", {}).get("是否最新", {}).get("checkbox")), None
-    )
+    today = datetime.now(TZ).date().isoformat()
+
+    # 找同股票代號的舊資料列（row_num 從 1 計，第 1 列是 header）
+    code_rows = [
+        (i + 2, r) for i, r in enumerate(all_rows[1:])
+        if r and r[0] == code
+    ]
+    max_count = max((int(r[8]) for _, r in code_rows if len(r) > 8 and r[8].isdigit()), default=0)
     first_date = min(
-        (r["properties"]["首次發現日期"]["date"]["start"]
-         for r in results
-         if (r.get("properties", {}).get("首次發現日期", {}).get("date") or {}).get("start")),
-        default=datetime.now(TZ).date().isoformat()
+        (r[17] for _, r in code_rows if len(r) > 17 and r[17]),
+        default=today
     )
 
-    props = {
-        "股票代號":       {"title": rt(code)},
-        "股票名稱":       {"rich_text": rt(ann['公司名稱'])},
-        "最新股價":       {"number": price or None},
-        "AI評級燈號":     {"select": {"name": str(ai.get("ai_rating", "🟡 一般觀望"))[:100]}},
-        "AI完整分析":     {"rich_text": rt(ai.get("display_text", ""))},
-        "最新公告主旨":   {"rich_text": rt(ann['主旨'])},
-        "最新公告說明":   {"rich_text": rt(ann['說明'][:2000])},
-        "符合條款":       {"rich_text": rt(ann['符合條款'])},
-        "公告次數":       {"number": new_count},
-        "最新單月EPS":    {"number": ai.get("monthly_eps")},
-        "EPS年增率":      {"number": ai.get("eps_yoy")},
-        "最新單月營收":   {"rich_text": rt(ai.get("monthly_revenue", ""))},
-        "營收年增率":     {"number": ai.get("revenue_yoy")},
-        "預估全年EPS":    {"number": pe.get("pre_annual_eps")},
-        "評分理由":       {"rich_text": rt(ai.get("rating_reason", ""))},
-        "產業熱度與風險": {"rich_text": rt(ai.get("industry_risk", ""))},
-        "是否最新":       {"checkbox": True},
-        "首次發現日期":   {"date": {"start": first_date}},
-    }
-    if ann['發言日期']:
-        props["最新公告日期"] = {"date": {"start": ann['發言日期']}}
+    # 把舊的「是否最新」改為 FALSE
+    for row_num, r in code_rows:
+        if len(r) > 16 and r[16] == 'TRUE':
+            ws.update_cell(row_num, 17, 'FALSE')
 
-    if latest_yes:
-        notion_req("PATCH", f"pages/{latest_yes['id']}",
-                   {"properties": {"是否最新": {"checkbox": False}}})
-    notion_req("POST", "pages", {"parent": {"database_id": NOTION_DB_ID}, "properties": props})
+    def v(x): return x if x is not None else ''
+    new_row = [
+        code,
+        ann['公司名稱'],
+        v(price),
+        ai.get('ai_rating', '🟡 一般觀望'),
+        ai.get('display_text', ''),
+        ann['主旨'],
+        ann['說明'][:50000],
+        ann['符合條款'],
+        max_count + 1,
+        v(ai.get('monthly_eps')),
+        v(ai.get('eps_yoy')),
+        ai.get('monthly_revenue', ''),
+        v(ai.get('revenue_yoy')),
+        v(pe.get('pre_annual_eps')),
+        ai.get('rating_reason', ''),
+        ai.get('industry_risk', ''),
+        'TRUE',
+        first_date,
+        ann['發言日期'] or '',
+    ]
+    ws.append_row(new_row, value_input_option='RAW')
 
 # ── 主程式 ────────────────────────────────────────────────────────
 def main():
@@ -635,10 +634,10 @@ def main():
         print("  ✅ Telegram 送出")
 
         try:
-            sync_notion(ann, ai, pe, price)
-            print("  ✅ Notion 同步")
+            sync_gsheet(ann, ai, pe, price)
+            print("  ✅ Google Sheet 同步")
         except Exception as e:
-            print(f"  Notion 失敗：{e}")
+            print(f"  Google Sheet 失敗：{e}")
 
         time.sleep(60)
 
