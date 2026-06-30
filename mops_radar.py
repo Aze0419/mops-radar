@@ -633,11 +633,14 @@ def main():
         send_telegram(header + ai.get("display_text", ""))
         print("  ✅ Telegram 送出")
 
-        try:
-            sync_gsheet(ann, ai, pe, price)
-            print("  ✅ Google Sheet 同步")
-        except Exception as e:
-            print(f"  Google Sheet 失敗：{e}")
+        if ai.get('ai_rating', '') in ('🔴 強烈買進', '🟠 建議買進'):
+            try:
+                sync_gsheet(ann, ai, pe, price)
+                print("  ✅ Google Sheet 同步")
+            except Exception as e:
+                print(f"  Google Sheet 失敗：{e}")
+        else:
+            print(f"  略過 Google Sheet（{ai.get('ai_rating')}）")
 
         time.sleep(60)
 
