@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""抓最新收盤價：每日 14:15 執行，抓 TWSE+TPEX 存成 prices.json 並回寫 Google Sheet"""
+"""抓最新收盤價：每日 14:15 執行，抓 TWSE+TPEX 存成 prices.json 並回寫「台灣股票即時股價資料庫」"""
 import json, os, re, urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -8,9 +8,12 @@ from zoneinfo import ZoneInfo
 _env = Path(__file__).parent / ".env"
 if _env.exists():
     for _line in _env.read_text().splitlines():
-        if _line.strip() and not _line.startswith("#") and "=" in _line:
-            _k, _v = _line.split("=", 1)
-            os.environ.setdefault(_k.strip(), _v.strip())
+        _line = _line.strip()
+        if _line and not _line.startswith("#"):
+            _line = _line.replace("export ", "", 1)
+            if "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip().strip('"').strip("'"), _v.strip().strip('"').strip("'"))
 
 TZ         = ZoneInfo("Asia/Taipei")
 CACHE_FILE = Path(__file__).parent / "prices.json"
@@ -47,8 +50,12 @@ def fetch_tse(d):
             close = float(row[8].replace(",", ""))
         except (ValueError, IndexError):
             continue
+        try:
+            volume = int(row[2].replace(",", ""))
+        except (ValueError, IndexError):
+            volume = None
         if close > 0:
-            prices[code] = {"name": name, "close": close, "market": "tse"}
+            prices[code] = {"name": name, "close": close, "volume": volume, "market": "tse"}
     return prices
 
 def fetch_otc(d):
@@ -74,12 +81,16 @@ def fetch_otc(d):
             close = float(row[3].replace(",", ""))
         except (ValueError, IndexError):
             continue
+        try:
+            volume = int(row[9].replace(",", ""))
+        except (ValueError, IndexError):
+            volume = None
         if close > 0:
-            prices[code] = {"name": row[2], "close": close, "market": "otc"}
+            prices[code] = {"name": row[2], "close": close, "volume": volume, "market": "otc"}
     return prices
 
 def update_sheet(prices):
-    """把 Sheet 裡每支股票的股價欄（第3欄）更新為最新收盤價"""
+    """把「台灣股票即時股價資料庫」sheet1 每支股票的股價欄（第3欄）更新為最新收盤價"""
     if not GSHEET_ID:
         print("  GSHEET_ID 未設定，跳過 Sheet 回寫")
         return

@@ -8,9 +8,12 @@ import os, pathlib as _pl
 _env = _pl.Path(__file__).parent / ".env"
 if _env.exists():
     for _line in _env.read_text().splitlines():
-        if _line.strip() and not _line.strip().startswith("#") and "=" in _line:
-            _k, _v = _line.split("=", 1)
-            os.environ.setdefault(_k.strip(), _v.strip())
+        _line = _line.strip()
+        if _line and not _line.startswith("#"):
+            _line = _line.replace("export ", "", 1)
+            if "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip().strip(chr(34)).strip(chr(39)), _v.strip().strip(chr(34)).strip(chr(39)))
 # ── 設定（從環境變數讀取，或建立 .env 後用 python-dotenv 載入）──
 OPENROUTER_KEY   = os.environ["OPENROUTER_KEY"]
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
@@ -83,7 +86,7 @@ def _get_dashboard_row(code):
     return row.iloc[0].to_dict() if not row.empty else None
 
 
-# ── 1. 讀取 Google Sheet（快取，避免 read_watchlist 和 fetch_prices 各開一次連線）
+# ── 1. 讀取 Google Sheet（快取股價，避免同一次執行重複連線）
 _sheet_rows_cache = None
 
 def _get_sheet_rows():
@@ -93,17 +96,6 @@ def _get_sheet_rows():
         gc = gspread.service_account(filename=SA_KEY_FILE)
         _sheet_rows_cache = gc.open_by_key(GSHEET_ID).sheet1.get_all_values()
     return _sheet_rows_cache
-
-def read_watchlist():
-    rows = _get_sheet_rows()
-    watchlist = {}
-    for r in rows[1:]:
-        code = r[0].strip() if r else ''
-        name = r[1].strip() if len(r) > 1 else ''
-        if code:
-            watchlist[code] = name
-    print(f"  自選股清單：{len(watchlist)} 檔")
-    return watchlist
 
 # ── 2. 抓 MOPS 昨日公告清單 ───────────────────────────────────────
 def fetch_announcements(roc_year, month, day):
@@ -475,7 +467,7 @@ def send_telegram(text):
 
 # ── 7. Google Sheet 同步 ─────────────────────────────────────────
 RADAR_HEADERS = [
-    "股票代號", "股票名稱", "最新股價", "AI評級燈號", "公告次數",
+    "股票代號", "股票名稱", "最新股價", "AI評級燈號", "最新成交量", "公告次數",
     "最新單月EPS", "EPS年增率", "最新單月營收", "營收年增率", "預估全年EPS",
     "評分理由", "產業熱度與風險", "是否最新", "首次發現日期", "最新公告日期",
 ]
@@ -494,6 +486,20 @@ def _get_radar_ws():
             _radar_ws.append_row(RADAR_HEADERS)
     return _radar_ws
 
+_volumes_cache = None
+
+def _get_volume(code):
+    """從 prices.json 快取讀成交量（Google Sheet 沒有這欄，只能吃 fetch_prices.py 寫的快取）"""
+    global _volumes_cache
+    if _volumes_cache is None:
+        cache_file = _pl.Path(__file__).parent / "prices.json"
+        _volumes_cache = {}
+        if cache_file.exists():
+            cache = json.loads(cache_file.read_text())
+            _volumes_cache = {k: v.get("volume") for k, v in cache.get("prices", {}).items()}
+    v = _volumes_cache.get(code)
+    return round(v / 1000) if v is not None else None
+
 def sync_gsheet(ann, ai, pe, price):
     ws = _get_radar_ws()
     all_rows = ws.get_all_values()
@@ -505,23 +511,24 @@ def sync_gsheet(ann, ai, pe, price):
         (i + 2, r) for i, r in enumerate(all_rows[1:])
         if r and r[0] == code
     ]
-    max_count = max((int(r[8]) for _, r in code_rows if len(r) > 8 and r[8].isdigit()), default=0)
+    max_count = max((int(r[5]) for _, r in code_rows if len(r) > 5 and r[5].isdigit()), default=0)
     first_date = min(
-        (r[17] for _, r in code_rows if len(r) > 17 and r[17]),
+        (r[14] for _, r in code_rows if len(r) > 14 and r[14]),
         default=today
     )
 
     # 把舊的「是否最新」改為 FALSE
     for row_num, r in code_rows:
-        if len(r) > 12 and r[12] == '✅':
-            ws.update_cell(row_num, 13, '❌')
+        if len(r) > 13 and r[13] == '✅':
+            ws.update_cell(row_num, 14, '❌')
 
     def v(x): return x if x is not None else ''
     new_row = [
-        code,
+        int(code) if code.isdigit() else code,  # 純數字代號存成數字，Sheet 才不會顯示成文字（'開頭）
         ann['公司名稱'],
         v(price),
         ai.get('ai_rating', '🟡 一般觀望'),
+        v(_get_volume(code)),
         max_count + 1,
         v(ai.get('monthly_eps')),
         v(ai.get('eps_yoy')),
@@ -539,28 +546,19 @@ def sync_gsheet(ann, ai, pe, price):
 # ── 主程式 ────────────────────────────────────────────────────────
 def main():
     now = datetime.now(TZ)
-    yesterday = now - timedelta(days=1)
-    roc_year = str(yesterday.year - 1911)
-    month = yesterday.strftime('%m')
-    day   = yesterday.strftime('%d')
-    print(f"[{now.strftime('%H:%M:%S')}] 查詢 {yesterday.strftime('%Y-%m-%d')}（民國{roc_year}/{month}/{day}）公告")
-
-    print("讀取自選股清單...")
-    watchlist = read_watchlist()
-    if not watchlist:
-        print("  ⚠️ 自選股清單是空的")
-        return
+    days_back = 3 if now.weekday() == 0 else 1  # 星期一查上星期五，其他查前一天
+    target_date = now - timedelta(days=days_back)
+    roc_year = str(target_date.year - 1911)
+    month = target_date.strftime('%m')
+    day   = target_date.strftime('%d')
+    print(f"[{now.strftime('%H:%M:%S')}] 查詢 {target_date.strftime('%Y-%m-%d')}（民國{roc_year}/{month}/{day}）公告")
 
     print("抓取 MOPS 公告...")
     announcements = fetch_announcements(roc_year, month, day)
     print(f"  公告總數：{len(announcements)} 筆")
 
-    # 先只過濾自選股，詳細頁抓完後再用 eps_re 二次過濾
-    watchlist_anns = [a for a in announcements if a['公司代號'] in watchlist]
-    print(f"  自選股公告：{len(watchlist_anns)} 筆")
-
-    if not watchlist_anns:
-        send_telegram(f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有自選股公告")
+    if not announcements:
+        send_telegram(f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有公告")
         return
 
     # 從 t05sr01_1 取 onclick 參數（SEQ_NO 等），供詳細頁使用
@@ -569,7 +567,7 @@ def main():
 
     # 抓詳細頁，取得完整「說明」（在 EPS 過濾前執行，避免漏掉 EPS 只在詳細頁的公告）
     print("抓取公告詳細內容...")
-    for ann in watchlist_anns:
+    for ann in announcements:
         code = ann['公司代號']
         spoke_date8 = ann.get('發言日期', '').replace('-', '')
         key = (code, spoke_date8, ann.get('_spoke_time', ''))
@@ -590,7 +588,7 @@ def main():
 
     # 篩選：說明含「每股盈餘」且符合條款為 51 或 53 款
     matched = [
-        a for a in watchlist_anns
+        a for a in announcements
         if "每股盈餘" in a.get("說明", "")
         and ("51" in a.get("符合條款", "") or "53" in a.get("符合條款", ""))
     ]
@@ -605,7 +603,7 @@ def main():
 
     for ann in matched:
         code = ann['公司代號']
-        ann['公司名稱'] = ann['公司名稱'] or watchlist.get(code, code)
+        ann['公司名稱'] = ann['公司名稱'] or code
         price = prices.get(code, 0)
         print(f"\n處理 {code} {ann['公司名稱']}（股價 {price}）")
 
