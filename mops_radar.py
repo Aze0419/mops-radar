@@ -546,15 +546,17 @@ def sync_gsheet(ann, ai, pe, price):
 # ── 主程式 ────────────────────────────────────────────────────────
 def main():
     now = datetime.now(TZ)
-    days_back = 3 if now.weekday() == 0 else 1  # 星期一查上星期五，其他查前一天
-    target_date = now - timedelta(days=days_back)
-    roc_year = str(target_date.year - 1911)
-    month = target_date.strftime('%m')
-    day   = target_date.strftime('%d')
-    print(f"[{now.strftime('%H:%M:%S')}] 查詢 {target_date.strftime('%Y-%m-%d')}（民國{roc_year}/{month}/{day}）公告")
+    days_back_list = [3, 2, 1] if now.weekday() == 0 else [1]  # 星期一補查上星期五六日三天，其他查前一天
+    target_dates = [now - timedelta(days=d) for d in days_back_list]
 
     print("抓取 MOPS 公告...")
-    announcements = fetch_announcements(roc_year, month, day)
+    announcements = []
+    for target_date in target_dates:
+        roc_year = str(target_date.year - 1911)
+        month = target_date.strftime('%m')
+        day   = target_date.strftime('%d')
+        print(f"[{now.strftime('%H:%M:%S')}] 查詢 {target_date.strftime('%Y-%m-%d')}（民國{roc_year}/{month}/{day}）公告")
+        announcements += fetch_announcements(roc_year, month, day)
     print(f"  公告總數：{len(announcements)} 筆")
 
     if not announcements:
