@@ -636,7 +636,7 @@ def main():
         else:
             print(f"  略過 Google Sheet（{ai.get('ai_rating')}）")
 
-        time.sleep(60)
+        time.sleep(30)
 
     print(f"\n完成！共處理 {len(matched)} 筆")
 
