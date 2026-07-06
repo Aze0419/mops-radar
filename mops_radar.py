@@ -620,7 +620,6 @@ def main():
 
         header = (f"📢【{ann['公司名稱']}｜{code}】\n"
                   f"📅 {ann['發言日期']} {ann['發言時間']}\n"
-                  f"📌 {ann['主旨']}\n"
                   f"📑 {ann['符合條款']}\n\n"
                   f"🤖 <b>AI 分析：</b>\n")
         send_telegram(header + ai.get("display_text", ""))
