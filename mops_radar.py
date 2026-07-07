@@ -18,7 +18,6 @@ if _env.exists():
 OPENROUTER_KEY   = os.environ["OPENROUTER_KEY"]
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-GSHEET_ID        = os.environ["GSHEET_ID"]
 RADAR_SHEET_ID   = os.environ.get("RADAR_SHEET_ID", "1UulUtCjGbBUk_36xCK7TuRSrEvBFCCr7okKWBlJBvuc")
 RADAR_SHEET_NAME = "公告紀錄"
 SA_KEY_FILE      = os.environ.get("SA_KEY_FILE", "/Users/iroman/ai-hedge-fund-tw/google-sa.json")
@@ -85,17 +84,6 @@ def _get_dashboard_row(code):
     row = df[df["股號"] == str(code)]
     return row.iloc[0].to_dict() if not row.empty else None
 
-
-# ── 1. 讀取 Google Sheet（快取股價，避免同一次執行重複連線）
-_sheet_rows_cache = None
-
-def _get_sheet_rows():
-    global _sheet_rows_cache
-    if _sheet_rows_cache is None:
-        import gspread
-        gc = gspread.service_account(filename=SA_KEY_FILE)
-        _sheet_rows_cache = gc.open_by_key(GSHEET_ID).sheet1.get_all_values()
-    return _sheet_rows_cache
 
 # ── 2. 抓 MOPS 昨日公告清單 ───────────────────────────────────────
 def fetch_announcements(roc_year, month, day):
@@ -198,37 +186,35 @@ def fetch_detail(company_id, spoke_time, spoke_date, seq_no):
             time.sleep(3)
     return ''
 
-# ── 3. 取收盤價（優先讀 Google Sheet C欄，fallback prices.json）──
-def fetch_prices():
-    # 優先：從 Google Sheet 讀（與 V5.05 DataTable 同邏輯）
-    try:
-        rows = _get_sheet_rows()
-        prices = {}
-        for r in rows[1:]:
-            code  = r[0].strip() if r else ''
-            price = r[2].strip() if len(r) > 2 else ''
-            if code and price:
-                try:
-                    prices[code] = float(price.replace(',', ''))
-                except ValueError:
-                    pass
-        if prices:
-            print(f"  讀 Google Sheet 股價：{len(prices)} 筆")
-            return prices
-    except Exception as e:
-        print(f"  Google Sheet 股價讀取失敗：{e}，改用 prices.json")
+# ── 3. 取收盤價與成交量（Supabase stock_prices 每檔股票最新一筆）──
+_supabase_client = None
 
-    # Fallback：prices.json
-    from pathlib import Path
-    cache_file = Path(__file__).parent / "prices.json"
-    if cache_file.exists():
-        cache = json.loads(cache_file.read_text())
-        date = cache.get("date", "")
-        prices = {k: v["close"] for k, v in cache.get("prices", {}).items()}
-        if prices:
-            print(f"  讀快取股價：{date}，共 {len(prices)} 筆")
-            return prices
-    return {}
+def _get_supabase():
+    global _supabase_client
+    if _supabase_client is None:
+        from supabase import create_client
+        _supabase_client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
+    return _supabase_client
+
+def fetch_prices(codes):
+    prices = {}
+    for code in codes:
+        try:
+            resp = (
+                _get_supabase().table("stock_prices")
+                .select("close,volume")
+                .eq("code", code)
+                .order("date", desc=True)
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:
+            print(f"  Supabase 股價讀取失敗 {code}：{e}")
+            continue
+        if resp.data:
+            prices[code] = {"close": resp.data[0]["close"], "volume": resp.data[0]["volume"]}
+    print(f"  讀 Supabase 股價：{len(prices)}/{len(codes)} 筆")
+    return prices
 
 # ── 4. 預算本益比 ─────────────────────────────────────────────────
 def _parse_num(s):
@@ -436,6 +422,7 @@ def analyze(ann, price, pe, dashboard=None):
         f"預估本益比：{pe['pre_pe_note']}"
         + dash_block
         + f"\n公告內容：\n{ann['說明'][:3000]}"
+        + "\n\n（收盤價與成交量已顯示在訊息開頭，display_text 不需要再重複列出這兩項）"
     )
     result = http_post_json(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -486,21 +473,7 @@ def _get_radar_ws():
             _radar_ws.append_row(RADAR_HEADERS)
     return _radar_ws
 
-_volumes_cache = None
-
-def _get_volume(code):
-    """從 prices.json 快取讀成交量（Google Sheet 沒有這欄，只能吃 fetch_prices.py 寫的快取）"""
-    global _volumes_cache
-    if _volumes_cache is None:
-        cache_file = _pl.Path(__file__).parent / "prices.json"
-        _volumes_cache = {}
-        if cache_file.exists():
-            cache = json.loads(cache_file.read_text())
-            _volumes_cache = {k: v.get("volume") for k, v in cache.get("prices", {}).items()}
-    v = _volumes_cache.get(code)
-    return round(v / 1000) if v is not None else None
-
-def sync_gsheet(ann, ai, pe, price):
+def sync_gsheet(ann, ai, pe, price, volume):
     ws = _get_radar_ws()
     all_rows = ws.get_all_values()
     code = ann['公司代號']
@@ -528,7 +501,7 @@ def sync_gsheet(ann, ai, pe, price):
         ann['公司名稱'],
         v(price),
         ai.get('ai_rating', '🟡 一般觀望'),
-        v(_get_volume(code)),
+        v(volume),
         max_count + 1,
         v(ai.get('monthly_eps')),
         v(ai.get('eps_yoy')),
@@ -601,13 +574,16 @@ def main():
         return
 
     print("抓取股價...")
-    prices = fetch_prices()
+    prices = fetch_prices([a['公司代號'] for a in matched])
 
     for ann in matched:
         code = ann['公司代號']
         ann['公司名稱'] = ann['公司名稱'] or code
-        price = prices.get(code, 0)
-        print(f"\n處理 {code} {ann['公司名稱']}（股價 {price}）")
+        pv = prices.get(code, {})
+        price = pv.get('close', 0)
+        volume = pv.get('volume')
+        volume_lots = round(volume / 1000) if volume is not None else None
+        print(f"\n處理 {code} {ann['公司名稱']}（股價 {price}，成交量 {volume_lots}張）")
 
         pe = calc_pe(ann['說明'], price)
         dashboard = _get_dashboard_row(code)
@@ -622,14 +598,15 @@ def main():
 
         header = (f"📢【{ann['公司名稱']}｜{code}】\n"
                   f"📅 {ann['發言日期']} {ann['發言時間']}\n"
-                  f"📑 {ann['符合條款']}\n\n"
+                  f"📑 {ann['符合條款']}\n"
+                  f"💰 收盤價: {price} | 成交量: {volume_lots if volume_lots is not None else '無資料'}\n\n"
                   f"🤖 <b>AI 分析：</b>\n")
         send_telegram(header + ai.get("display_text", ""))
         print("  ✅ Telegram 送出")
 
         if ai.get('ai_rating', '') in ('🔴 強烈買進', '🟠 建議買進'):
             try:
-                sync_gsheet(ann, ai, pe, price)
+                sync_gsheet(ann, ai, pe, price, volume_lots)
                 print("  ✅ Google Sheet 同步")
             except Exception as e:
                 print(f"  Google Sheet 失敗：{e}")
