@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""抓最新收盤價：每日 14:15 執行，抓 TWSE+TPEX 存成 prices.json 並回寫「台灣股票即時股價資料庫」"""
+"""抓最新收盤價：每日 14:15 執行，抓 TWSE+TPEX 存成 prices.json 並回寫 Supabase stock_prices"""
 import json, os, re, urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,8 +17,6 @@ if _env.exists():
 
 TZ         = ZoneInfo("Asia/Taipei")
 CACHE_FILE = Path(__file__).parent / "prices.json"
-SA_KEY_FILE = os.environ.get("SA_KEY_FILE", "/Users/iroman/ai-hedge-fund-tw/google-sa.json")
-GSHEET_ID   = os.environ.get("GSHEET_ID", "")
 
 def smart_date():
     """13:30 前用昨天，週末往前推到週五"""
@@ -89,33 +87,26 @@ def fetch_otc(d):
             prices[code] = {"name": row[2], "close": close, "volume": volume, "market": "otc"}
     return prices
 
-def update_sheet(prices):
-    """把「台灣股票即時股價資料庫」sheet1 每支股票的股價欄（第3欄）更新為最新收盤價"""
-    if not GSHEET_ID:
-        print("  GSHEET_ID 未設定，跳過 Sheet 回寫")
+def upsert_supabase(d, prices):
+    """把當日全市場收盤價寫入 Supabase stock_prices（code,date,close,volume；shares 單位）"""
+    url, key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY")
+    if not url or not key:
+        print("  SUPABASE_URL/SUPABASE_SERVICE_KEY 未設定，跳過回寫")
         return
-    import gspread
-    gc = gspread.service_account(filename=SA_KEY_FILE)
-    ws = gc.open_by_key(GSHEET_ID).sheet1
-    rows = ws.get_all_values()
-    if len(rows) <= 1:
-        print("  Sheet 無股票資料，跳過回寫")
-        return
-
-    updates = []
-    for i, row in enumerate(rows[1:], start=2):  # 從第2列開始（跳過標題）
-        code = (row[0] if len(row) > 0 else "").strip()
-        if not code:
-            continue
-        price = prices.get(code, {}).get("close")
-        if price is not None:
-            updates.append({"range": f"C{i}", "values": [[price]]})
-
-    if updates:
-        ws.batch_update(updates)
-        print(f"  ✅ Sheet 回寫 {len(updates)} 筆股價")
-    else:
-        print("  Sheet 股票代號均無對應收盤價")
+    from supabase import create_client
+    client = create_client(url, key)
+    date_str = d.strftime("%Y-%m-%d")
+    rows = [
+        {"code": code, "date": date_str, "close": p["close"], "volume": p["volume"]}
+        for code, p in prices.items()
+    ]
+    CHUNK = 500
+    written = 0
+    for i in range(0, len(rows), CHUNK):
+        chunk = rows[i:i + CHUNK]
+        client.table("stock_prices").upsert(chunk, on_conflict="code,date").execute()
+        written += len(chunk)
+    print(f"  ✅ Supabase 回寫 {written} 筆股價")
 
 def main():
     d = smart_date()
@@ -141,11 +132,11 @@ def main():
     }, ensure_ascii=False))
     print(f"  已存 {len(prices)} 筆 → {CACHE_FILE}")
 
-    print("  回寫 Google Sheet...")
+    print("  回寫 Supabase...")
     try:
-        update_sheet(prices)
+        upsert_supabase(d, prices)
     except Exception as e:
-        print(f"  Sheet 回寫失敗：{e}")
+        print(f"  Supabase 回寫失敗：{e}")
 
 if __name__ == "__main__":
     main()
