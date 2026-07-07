@@ -622,17 +622,17 @@ def send_results():
         return
 
     items = cache.get("items", [])
+    blocks = []
     for item in items:
         ann, ai, pe = item["ann"], item["ai"], item["pe"]
         code, price, volume_lots = ann['公司代號'], item["price"], item["volume_lots"]
 
-        header = (f"📢【{ann['公司名稱']}｜{code}】\n"
-                  f"📅 {ann['發言日期']} {ann['發言時間']}\n"
-                  f"📑 {ann['符合條款']}\n"
-                  f"💰 收盤價: {price} | 成交量: {volume_lots if volume_lots is not None else '無資料'}\n\n"
-                  f"🤖 <b>AI 分析：</b>\n")
-        send_telegram(header + ai.get("display_text", ""))
-        print(f"  ✅ Telegram 送出：{code}")
+        blocks.append(f"📢【{ann['公司名稱']}｜{code}】\n"
+                      f"📅 {ann['發言日期']} {ann['發言時間']}\n"
+                      f"📑 {ann['符合條款']}\n"
+                      f"💰 收盤價: {price} | 成交量: {volume_lots if volume_lots is not None else '無資料'}\n\n"
+                      f"🤖 <b>AI 分析：</b>\n"
+                      f"{ai.get('display_text', '')}")
 
         if ai.get('ai_rating', '') in ('🔴 強烈買進', '🟠 建議買進'):
             try:
@@ -643,7 +643,10 @@ def send_results():
         else:
             print(f"  略過 Google Sheet（{ai.get('ai_rating')}）")
 
-        time.sleep(30)
+    # 合成一則訊息送出；send_telegram 本身已會在 4000 字處自動分段（Telegram 單則上限）
+    message = f"📊 今日符合條件公告（{len(items)} 筆）\n\n" + "\n\n━━━━━━━━━━\n\n".join(blocks)
+    send_telegram(message)
+    print(f"  ✅ Telegram 合併送出（{len(items)} 筆）")
 
     print(f"\n完成！共送出 {len(items)} 筆")
     CACHE_FILE.unlink()
