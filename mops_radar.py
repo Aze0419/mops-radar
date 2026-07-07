@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """MOPS 飆股雷達：每日監控重大公告 + AI分析 → Telegram + Google Sheet"""
-import re, json, time, urllib.request, urllib.parse, urllib.error
+import re, json, sys, time, urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -517,7 +517,14 @@ def sync_gsheet(ann, ai, pe, price, volume):
     ws.insert_row(new_row, 2, value_input_option='RAW')
 
 # ── 主程式 ────────────────────────────────────────────────────────
-def main():
+# 01:00 跑 scan()：抓公告+AI 分析，存 CACHE_FILE，不送 Telegram
+# 06:00 跑 send_results()：讀 CACHE_FILE 送 Telegram + 同步 Sheet
+CACHE_FILE = _pl.Path(__file__).parent / "pending_results.json"
+
+def _save_cache(data):
+    CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False))
+
+def scan():
     now = datetime.now(TZ)
     days_back_list = [3, 2, 1] if now.weekday() == 0 else [1]  # 星期一補查上星期五六日三天，其他查前一天
     target_dates = [now - timedelta(days=d) for d in days_back_list]
@@ -533,7 +540,7 @@ def main():
     print(f"  公告總數：{len(announcements)} 筆")
 
     if not announcements:
-        send_telegram(f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有公告")
+        _save_cache({"empty": f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有公告", "items": []})
         return
 
     # 從 t05sr01_1 取 onclick 參數（SEQ_NO 等），供詳細頁使用
@@ -570,12 +577,13 @@ def main():
     print(f"  符合條件：{len(matched)} 筆")
 
     if not matched:
-        send_telegram(f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有符合訊號的公告")
+        _save_cache({"empty": f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有符合訊號的公告", "items": []})
         return
 
     print("抓取股價...")
     prices = fetch_prices([a['公司代號'] for a in matched])
 
+    items = []
     for ann in matched:
         code = ann['公司代號']
         ann['公司名稱'] = ann['公司名稱'] or code
@@ -596,13 +604,35 @@ def main():
             print(f"  AI 失敗：{e}")
             ai = {"display_text": f"AI分析失敗：{e}", "ai_rating": "🟡 一般觀望"}
 
+        items.append({"ann": ann, "price": price, "volume_lots": volume_lots, "ai": ai, "pe": pe})
+
+    _save_cache({"empty": None, "items": items})
+    print(f"\n分析完成，共 {len(items)} 筆，等 06:00 送出")
+
+def send_results():
+    if not CACHE_FILE.exists():
+        print("無待送結果（scan 尚未跑或已送出過）")
+        return
+    cache = json.loads(CACHE_FILE.read_text())
+
+    if cache.get("empty"):
+        send_telegram(cache["empty"])
+        print("  ✅ Telegram 送出（無符合公告）")
+        CACHE_FILE.unlink()
+        return
+
+    items = cache.get("items", [])
+    for item in items:
+        ann, ai, pe = item["ann"], item["ai"], item["pe"]
+        code, price, volume_lots = ann['公司代號'], item["price"], item["volume_lots"]
+
         header = (f"📢【{ann['公司名稱']}｜{code}】\n"
                   f"📅 {ann['發言日期']} {ann['發言時間']}\n"
                   f"📑 {ann['符合條款']}\n"
                   f"💰 收盤價: {price} | 成交量: {volume_lots if volume_lots is not None else '無資料'}\n\n"
                   f"🤖 <b>AI 分析：</b>\n")
         send_telegram(header + ai.get("display_text", ""))
-        print("  ✅ Telegram 送出")
+        print(f"  ✅ Telegram 送出：{code}")
 
         if ai.get('ai_rating', '') in ('🔴 強烈買進', '🟠 建議買進'):
             try:
@@ -615,7 +645,14 @@ def main():
 
         time.sleep(30)
 
-    print(f"\n完成！共處理 {len(matched)} 筆")
+    print(f"\n完成！共送出 {len(items)} 筆")
+    CACHE_FILE.unlink()
 
 if __name__ == "__main__":
-    main()
+    mode = sys.argv[1] if len(sys.argv) > 1 else "scan"
+    if mode == "scan":
+        scan()
+    elif mode == "send":
+        send_results()
+    else:
+        sys.exit(f"未知模式：{mode}（用 scan 或 send）")
