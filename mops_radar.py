@@ -440,17 +440,13 @@ def analyze(ann, price, pe, dashboard=None):
 # ── 6. Telegram ───────────────────────────────────────────────────
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    while text:
-        if len(text) <= 4000:
-            chunk, text = text, ''
-        else:
-            cut = text.rfind('\n', 0, 4000)
-            cut = cut if cut != -1 else 4000  # 找不到換行才硬切
-            chunk, text = text[:cut], text[cut+1:]
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"}
-        req = urllib.request.Request(url, data=json.dumps(payload).encode(),
-                                     headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
+    if len(text) > 4000:
+        cut = text.rfind('\n', 0, 4000)
+        text = text[:cut if cut != -1 else 4000]
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10)
 
 # ── 7. Google Sheet 同步 ─────────────────────────────────────────
 RADAR_HEADERS = [
