@@ -627,12 +627,17 @@ def send_results():
         ann, ai, pe = item["ann"], item["ai"], item["pe"]
         code, price, volume_lots = ann['公司代號'], item["price"], item["volume_lots"]
 
+        display_text = ai.get('display_text', '')
+        if display_text.count('<b>') != display_text.count('</b>'):
+            # AI 偶爾漏打閉合標籤，標籤沒配對會讓 Telegram HTML 解析整則失敗，寧可拿掉粗體也要送得出去
+            display_text = display_text.replace('<b>', '').replace('</b>', '')
+
         blocks.append(f"📢【{ann['公司名稱']}｜{code}】\n"
                       f"📅 {ann['發言日期']} {ann['發言時間']}\n"
                       f"📑 {ann['符合條款']}\n"
                       f"💰 收盤價: {price} | 成交量: {volume_lots if volume_lots is not None else '無資料'}\n\n"
                       f"🤖 <b>AI 分析：</b>\n"
-                      f"{ai.get('display_text', '')}")
+                      f"{display_text}")
 
         if ai.get('ai_rating', '') in ('🔴 強烈買進', '🟠 建議買進'):
             try:
@@ -643,10 +648,25 @@ def send_results():
         else:
             print(f"  略過 Google Sheet（{ai.get('ai_rating')}）")
 
-    # 合成一則訊息送出；send_telegram 本身已會在 4000 字處自動分段（Telegram 單則上限）
-    message = f"📊 今日符合條件公告（{len(items)} 筆）\n\n" + "\n\n━━━━━━━━━━\n\n".join(blocks)
-    send_telegram(message)
-    print(f"  ✅ Telegram 合併送出（{len(items)} 筆）")
+    # 依「整個公司區塊」分批送出（不可用 send_telegram 內建的逐字切段，
+    # 那個切法不管 HTML tag 有沒有被切斷，長訊息會讓 Telegram 回 400）
+    SEP, LIMIT = "\n\n━━━━━━━━━━\n\n", 3800
+    batches, cur, cur_len = [], [], 0
+    for b in blocks:
+        add_len = len(b) + (len(SEP) if cur else 0)
+        if cur and cur_len + add_len > LIMIT:
+            batches.append(SEP.join(cur))
+            cur, cur_len = [], 0
+        cur.append(b)
+        cur_len += len(b) + (len(SEP) if len(cur) > 1 else 0)
+    if cur:
+        batches.append(SEP.join(cur))
+
+    title = f"📊 今日符合條件公告（{len(items)} 筆）"
+    for i, batch in enumerate(batches, 1):
+        prefix = title + (f"（{i}/{len(batches)}）" if len(batches) > 1 else "") + "\n\n"
+        send_telegram(prefix + batch)
+    print(f"  ✅ Telegram 送出（{len(items)} 筆，分 {len(batches)} 則）")
 
     print(f"\n完成！共送出 {len(items)} 筆")
     CACHE_FILE.unlink()
