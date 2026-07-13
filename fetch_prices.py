@@ -57,34 +57,32 @@ def fetch_tse(d):
     return prices
 
 def fetch_otc(d):
-    """上櫃：TPEX DAILY_CLOSE CSV"""
-    url = (f"https://www.tpex.org.tw/web/stock/aftertrading/DAILY_CLOSE_quotes/"
-           f"stk_quote_result.php?l=zh-tw&o=data&d={d.strftime('%Y/%m/%d')}&response=Text")
+    """上櫃：TPEX 改版後 dailyQuotes JSON（舊 stk_quote_result.php 無視日期參數，永遠回最新一天）"""
+    url = (f"https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes"
+           f"?date={d.strftime('%Y/%m/%d')}&response=json")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        text = r.read().decode("utf-8", errors="replace")
+    with urllib.request.urlopen(req, timeout=60) as r:
+        data = json.load(r)
+
+    if data.get("date") != d.strftime("%Y%m%d"):
+        # 該日查無資料（休市或尚未發布），不能把別天的資料標成 d
+        return {}
 
     prices = {}
-    for line in text.strip().split("\n")[1:]:
-        line = line.strip()
-        if not line.startswith('"'):
-            continue
-        row = re.sub(r'^"|"$', "", line).split('","')
-        if len(row) < 4:
-            continue
-        code = row[1]
+    for row in data["tables"][0]["data"]:
+        code = row[0]
         if not re.match(r"^\d{4}$", code):
             continue
         try:
-            close = float(row[3].replace(",", ""))
+            close = float(row[2].replace(",", ""))
         except (ValueError, IndexError):
             continue
         try:
-            volume = int(row[9].replace(",", ""))
+            volume = int(row[8].replace(",", ""))
         except (ValueError, IndexError):
             volume = None
         if close > 0:
-            prices[code] = {"name": row[2], "close": close, "volume": volume, "market": "otc"}
+            prices[code] = {"name": row[1], "close": close, "volume": volume, "market": "otc"}
     return prices
 
 def upsert_supabase(d, prices):
