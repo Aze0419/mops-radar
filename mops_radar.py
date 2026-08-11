@@ -516,6 +516,66 @@ def sync_gsheet(ann, ai, pe, price, volume):
     ]
     ws.insert_row(new_row, 2, value_input_option='RAW')
 
+RADAR_HISTORY_SHEET_NAME = "歷史紀錄"
+_history_ws = None
+
+def _get_history_ws():
+    global _history_ws
+    if _history_ws is None:
+        import gspread
+        gc = gspread.service_account(filename=SA_KEY_FILE)
+        ss = gc.open_by_key(RADAR_SHEET_ID)
+        _history_ws = ss.worksheet(RADAR_HISTORY_SHEET_NAME)
+    return _history_ws
+
+_SHEET_EPOCH = datetime(1899, 12, 30, tzinfo=TZ).date()
+
+def sync_history(ann, price):
+    """強烈買進才記一筆：A股號、F股價、G日期(序列值) 寫靜態值；B/C/D/E（股名/漲跌/漲跌%/即時股價）從上一列複製公式，
+    不能寫死，否則會蓋掉 VLOOKUP／TW_PRICE 這些即時公式。同日同股票已存在就跳過。"""
+    ws = _get_history_ws()
+    code = ann['公司代號']
+    code_val = int(code) if code.isdigit() else code
+    today = datetime.now(TZ).date()
+    today_serial = (today - _SHEET_EPOCH).days
+
+    row_count = len(ws.get_all_values())  # 只用來抓目前總列數
+    existing = ws.get(f"A3:G{row_count}", value_render_option='UNFORMATTED_VALUE') if row_count >= 3 else []
+    if any(r and len(r) > 6 and r[0] == code_val and r[6] == today_serial for r in existing):
+        print(f"  歷史紀錄已有 {code} {today.isoformat()}，略過")
+        return
+
+    new_row_num = row_count + 1
+    if new_row_num > 3:  # row3 是第一筆資料列，沒有「上一列」可複製格式/公式
+        ss = ws.spreadsheet
+        ss.batch_update({"requests": [
+            {  # 先複製上一列的儲存格格式（含 G 的日期顯示格式），避免新列格式跑掉
+                "copyPaste": {
+                    "source": {"sheetId": ws.id,
+                               "startRowIndex": new_row_num - 2, "endRowIndex": new_row_num - 1,
+                               "startColumnIndex": 0, "endColumnIndex": 7},
+                    "destination": {"sheetId": ws.id,
+                                    "startRowIndex": new_row_num - 1, "endRowIndex": new_row_num,
+                                    "startColumnIndex": 0, "endColumnIndex": 7},
+                    "pasteType": "PASTE_FORMAT",
+                }
+            },
+            {  # 再複製 B~E 的公式（VLOOKUP 股名／漲跌／漲跌%／即時股價），相對參照會自動位移到新列
+                "copyPaste": {
+                    "source": {"sheetId": ws.id,
+                               "startRowIndex": new_row_num - 2, "endRowIndex": new_row_num - 1,
+                               "startColumnIndex": 1, "endColumnIndex": 5},
+                    "destination": {"sheetId": ws.id,
+                                    "startRowIndex": new_row_num - 1, "endRowIndex": new_row_num,
+                                    "startColumnIndex": 1, "endColumnIndex": 5},
+                    "pasteType": "PASTE_FORMULA",
+                }
+            },
+        ]})
+
+    ws.update(f"A{new_row_num}", [[code_val]], value_input_option='RAW')
+    ws.update(f"F{new_row_num}:G{new_row_num}", [[price, today_serial]], value_input_option='RAW')
+
 # ── 主程式 ────────────────────────────────────────────────────────
 # 01:00 跑 scan()：抓公告+AI 分析，存 CACHE_FILE，不送 Telegram
 # 06:00 跑 send_results()：讀 CACHE_FILE 送 Telegram + 同步 Sheet
@@ -647,6 +707,13 @@ def send_results():
                 print(f"  Google Sheet 失敗：{e}")
         else:
             print(f"  略過 Google Sheet（{ai.get('ai_rating')}）")
+
+        if ai.get('ai_rating', '') == '🔴 強烈買進':
+            try:
+                sync_history(ann, price)
+                print("  ✅ 歷史紀錄同步")
+            except Exception as e:
+                print(f"  歷史紀錄失敗：{e}")
 
     # 依「整個公司區塊」分批送出（不可用 send_telegram 內建的逐字切段，
     # 那個切法不管 HTML tag 有沒有被切斷，長訊息會讓 Telegram 回 400）
