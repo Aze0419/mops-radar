@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """抓最新收盤價：每日 14:15 執行，抓 TWSE+TPEX 存成 prices.json 並回寫 Supabase stock_prices"""
-import json, os, re, time, urllib.error, urllib.request
+import json, os, re, sys, time, urllib.error, urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -19,7 +19,7 @@ TZ         = ZoneInfo("Asia/Taipei")
 CACHE_FILE = Path(__file__).parent / "prices.json"
 
 RETRY_INTERVAL = 300      # 資料還沒發布時，隔幾秒再試一次（TWSE 建議別打太密）
-RETRY_UNTIL    = (15, 30) # 最晚重試到這個時間點（台北時區），避免卡住整個排程
+RETRY_UNTIL    = (16, 0) # 最晚重試到這個時間點（台北時區），避免卡住整個排程
 REQUEST_GAP    = 3        # 每次對外請求之間至少停頓幾秒，降低碰到流量限制的機率
 
 def smart_date():
@@ -95,6 +95,60 @@ def fetch_otc(d):
         if close > 0:
             prices[code] = {"name": row.get("CompanyName"), "close": close, "volume": volume, "market": "otc"}
     return prices
+
+def fetch_otc_history(d):
+    """上櫃回補用：TPEx 網站舊版 afterTrading/otc 端點，唯一支援指定日期查詢的上櫃來源
+    （2026-08-19 發現，openapi 的 tpex_mainboard_quotes/tpex_mainboard_daily_close_quotes
+    都只回最新一天、沒有 date 參數）。type=EW 是「所有證券(不含權證、牛熊證)」。
+    只給 --backfill-otc 用來補歷史缺口，平常每日抓價仍用 fetch_otc。
+    """
+    roc = f"{d.year - 1911}/{d.strftime('%m/%d')}"
+    url = f"https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date={roc}&type=EW&id=&response=json"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        payload = json.load(r)
+
+    table = payload.get("tables", [{}])[0]
+    if table.get("date") != roc:
+        return {}
+
+    prices = {}
+    for row in table.get("data", []):
+        code = row[0].strip()
+        if not re.match(r"^\d{4}$", code):
+            continue
+        try:
+            close = float(row[2].strip())
+        except ValueError:
+            continue
+        try:
+            volume = int(row[7].strip().replace(",", ""))
+        except ValueError:
+            volume = None
+        if close > 0:
+            prices[code] = {"name": row[1].strip(), "close": close, "volume": volume, "market": "otc"}
+    return prices
+
+def backfill_otc(start_str, end_str):
+    """補歷史缺口用：逐個交易日（週一~五）呼叫 fetch_otc_history 並回寫 Supabase。
+    只補上櫃——上市 fetch_tse_openapi(STOCK_DAY_ALL) 本來就有 date 參數，缺口直接用平常流程補即可。
+    """
+    start = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=TZ)
+    end = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=TZ)
+    d = start
+    while d <= end:
+        if d.weekday() < 5:
+            print(f"[{d.strftime('%Y-%m-%d')}] 回補上櫃...")
+            try:
+                prices = fetch_otc_history(d)
+            except Exception as e:
+                print(f"  失敗：{e}")
+                prices = {}
+            print(f"  → {len(prices)} 筆")
+            if prices:
+                upsert_supabase(d, prices)
+            time.sleep(REQUEST_GAP)
+        d += timedelta(days=1)
 
 def fetch_tse_openapi(d):
     """上市備援：TWSE 官方 openapi.twse.com.tw STOCK_DAY_ALL（文件化正式 API，
@@ -187,7 +241,52 @@ def upsert_supabase(d, prices):
     note = f"（跳過不在白名單的 {len(skipped)} 筆：{','.join(skipped[:10])}{'...' if len(skipped) > 10 else ''}）" if skipped else ""
     print(f"  ✅ Supabase 回寫 {written} 筆股價{note}")
 
-def main():
+    if written:
+        refresh_factor_selection_latest(client)
+        sync_factor_sheet()
+
+FACTOR_SYNC_DIR = Path(os.environ.get("FACTOR_SYNC_DIR", "/Users/iroman/factor_sync"))
+
+def sync_factor_sheet():
+    """view 重算完，順便把因子選股的 sheet_sync.py 也跑一次，讓 Google Sheet 當場反映
+    最新股價，不用等因子選股自己 15:50 那次排程才推。只跑 sheet_sync.py（讀 Supabase
+    寫 Sheet），不跑 sync.py（那是抓營收/財報/董監持股，跟股價無關，不用每次股價
+    更新都重跑一次）。
+    """
+    python = FACTOR_SYNC_DIR / ".venv" / "bin" / "python"
+    if not python.exists():
+        python = Path("/usr/bin/python3")
+    try:
+        import subprocess
+        result = subprocess.run(
+            [str(python), "sheet_sync.py"], cwd=str(FACTOR_SYNC_DIR),
+            capture_output=True, text=True, timeout=180,
+        )
+        if result.returncode == 0:
+            print(f"  ✅ 已同步 Google Sheet：{result.stdout.strip()}")
+        else:
+            print(f"  sheet_sync.py 失敗（exit {result.returncode}）：{result.stderr.strip()[:300]}")
+    except Exception as e:
+        print(f"  sheet_sync.py 執行失敗：{e}")
+
+def refresh_factor_selection_latest(client):
+    """因子選股專案的 factor_selection_latest 是 materialized view，只有呼叫這個 RPC
+    才會重算，不會因為 stock_prices 有新資料就自動跟著動。這裡每次股價寫入後補呼叫，
+    這個 RPC 偶爾會 statement timeout（跟 stock_prices 表大小有關，不是這裡的問題），
+    重試一次就好，還是不行就跳過，不能讓這個失敗拖垮股價抓取本身。
+    """
+    for attempt in range(2):
+        try:
+            client.rpc("refresh_factor_selection_latest", {}).execute()
+            print("  ✅ 已重算 factor_selection_latest")
+            return
+        except Exception as e:
+            if attempt == 0:
+                time.sleep(5)
+            else:
+                print(f"  refresh_factor_selection_latest 失敗（重試過一次）：{e}")
+
+def main(tse_only=False):
     d = smart_date()
     print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] 抓取 {d.strftime('%Y-%m-%d')} 收盤價")
 
@@ -195,11 +294,16 @@ def main():
     tse = fetch_with_retry(fetch_tse, d, "上市", fallback_fn=fetch_tse_openapi)
     print(f"  → {len(tse)} 筆")
 
-    time.sleep(REQUEST_GAP)
-
-    print("  上櫃（TPEX）...")
-    otc = fetch_with_retry(fetch_otc, d, "上櫃")
-    print(f"  → {len(otc)} 筆")
+    if tse_only:
+        # 上櫃（TPEX）比上市晚公布，通常要到 15:00~15:30 才有資料，早鳥排程
+        # 硬等只會一路撞上 Hermes 的 1200s 執行上限；上櫃改交給 15:30 那個 job 抓。
+        print("  上櫃（TPEX）...跳過（--tse-only，交給 15:30 的補跑 job）")
+        otc = {}
+    else:
+        time.sleep(REQUEST_GAP)
+        print("  上櫃（TPEX）...")
+        otc = fetch_with_retry(fetch_otc, d, "上櫃")
+        print(f"  → {len(otc)} 筆")
 
     prices = {**tse, **otc}
     CACHE_FILE.write_text(json.dumps({
@@ -216,4 +320,12 @@ def main():
         print(f"  Supabase 回寫失敗：{e}")
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--backfill-otc":
+        if len(sys.argv) != 4:
+            print("用法：fetch_prices.py --backfill-otc 2026-08-11 2026-08-17")
+            sys.exit(1)
+        backfill_otc(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) > 1 and sys.argv[1] == "--tse-only":
+        main(tse_only=True)
+    else:
+        main()
