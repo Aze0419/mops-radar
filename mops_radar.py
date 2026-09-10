@@ -531,7 +531,7 @@ def _get_history_ws():
 _SHEET_EPOCH = datetime(1899, 12, 30, tzinfo=TZ).date()
 
 def sync_history(ann, price):
-    """強烈買進才記一筆：A股號、F股價、G日期(序列值) 寫靜態值；B/C/D/E（股名/漲跌/漲跌%/即時股價）從上一列複製公式，
+    """強烈買進才記一筆：A股號、F股價、G日期(序列值)、H來源標註(飆股雷達MM/DD) 寫靜態值；B/C/D/E（股名/漲跌/漲跌%/即時股價）從上一列複製公式，
     不能寫死，否則會蓋掉 VLOOKUP／TW_PRICE 這些即時公式。同日同股票已存在就跳過。"""
     ws = _get_history_ws()
     code = ann['公司代號']
@@ -575,6 +575,7 @@ def sync_history(ann, price):
 
     ws.update(f"A{new_row_num}", [[code_val]], value_input_option='RAW')
     ws.update(f"F{new_row_num}:G{new_row_num}", [[price, today_serial]], value_input_option='RAW')
+    ws.update(f"H{new_row_num}", [[f"飆股雷達{today.strftime('%m/%d')}"]], value_input_option='RAW')
 
 # ── 主程式 ────────────────────────────────────────────────────────
 # 01:00 跑 scan()：抓公告+AI 分析，存 CACHE_FILE，不送 Telegram
