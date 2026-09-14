@@ -3,3 +3,6 @@ prices.json
 __pycache__/
 *.pyc
 google-sa.json
+
+# backup snapshots — 時間戳備份，不需版控
+*.bak-*
