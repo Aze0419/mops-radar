@@ -3,6 +3,10 @@
 掃 MOPS 重大訊息公告，篩 EPS 條件，AI 分析後推 Telegram 與 Google Sheet。另外每日抓
 TWSE/TPEX 收盤價寫回 Supabase `stock_prices`（`fetch_prices.py`，因子選股表也讀這張）。
 
+![mops-radar 架構圖](docs/architecture.png)
+
+（原始檔／可編輯版本：[docs/architecture.html](docs/architecture.html)）
+
 ## 陷阱
 
 - **這個目錄（本機 git clone）現在才是 `fetch_prices.py` 實際執行的位置。**

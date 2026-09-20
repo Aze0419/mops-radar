@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>mops-radar Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&family=Noto+Sans+KR:wght@400;500;600&family=Noto+Serif+KR:wght@400&family=Noto+Sans+TC:wght@400;500;600&family=Noto+Serif+TC:wght@400&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --color-paper:       #f5f5f5;
+      --color-paper-2:     #ececec;
+      --color-ink:         #2d3142;
+      --color-muted:       #4f5d75;
+      --color-soft:        #7a8399;
+      --color-rule:        rgba(45,49,66,0.12);
+      --color-rule-solid:  rgba(79,93,117,0.25);
+      --color-accent:      #eb6c36;
+      --color-accent-tint: rgba(235,108,54,0.08);
+      --color-link:        #2e5aa8;
+      --font-sans:   'Geist', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', sans-serif;
+      --font-serif:  'Instrument Serif', 'Noto Serif TC', 'Noto Serif', serif;
+      --font-mono:   'Geist Mono', ui-monospace, Menlo, monospace;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      min-height: 100vh;
+      padding: 3rem 2rem;
+      color: var(--color-ink);
+    }
+
+    .container { max-width: 1200px; margin: 0 auto; }
+
+    .header { margin-bottom: 2.5rem; }
+
+    .header-eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.75rem;
+    }
+
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.5rem, 2.6vw + 1rem, 2.25rem);
+      font-weight: 400;
+      letter-spacing: -0.01em;
+      line-height: 1.2;
+      color: var(--color-ink);
+      margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+      font-family: var(--font-sans);
+      font-size: 0.95rem;
+      line-height: 1.6;
+      color: var(--color-muted);
+      max-width: 64ch;
+    }
+
+    .diagram-container {
+      background: transparent;
+      border: none;
+      padding: 0;
+      overflow-x: auto;
+    }
+
+    svg { width: 100%; min-width: 900px; display: block; }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1rem;
+      margin-top: 1.75rem;
+    }
+
+    .card {
+      background: #ffffff;
+      border-radius: 6px;
+      border: 1px solid var(--color-rule);
+      padding: 1.25rem;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-bottom: 0.875rem;
+      padding-bottom: 0.875rem;
+      border-bottom: 1px solid rgba(45,49,66,0.08);
+    }
+
+    .card-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .card-dot.ink    { background: var(--color-ink); }
+    .card-dot.muted  { background: var(--color-muted); }
+    .card-dot.coral  { background: var(--color-accent); }
+
+    .card h3 {
+      font-family: var(--font-sans);
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--color-ink);
+      letter-spacing: -0.005em;
+    }
+
+    .card ul {
+      list-style: none;
+      color: var(--color-muted);
+      font-size: 0.8125rem;
+      line-height: 1.6;
+    }
+
+    .card li {
+      margin-bottom: 0.3rem;
+      padding-left: 0.9rem;
+      position: relative;
+    }
+
+    .card li::before {
+      content: '—';
+      position: absolute;
+      left: 0;
+      color: rgba(45,49,66,0.25);
+      font-size: 0.75rem;
+    }
+
+    .footer {
+      margin-top: 2rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid rgba(45,49,66,0.10);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      color: var(--color-soft);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <div class="header">
+      <p class="header-eyebrow">Architecture · mops-radar · 2026-09-20</p>
+      <h1>MOPS 飆股雷達系統架構</h1>
+      <p class="subtitle">每日收盤價寫進 Supabase，凌晨掃 MOPS 重大訊息公告配合股價算本益比、AI 分析，早上推播 Telegram 與 Google Sheet。同一支 repo 裡兩支腳本的實際執行位置不一樣，是這個系統最容易踩的坑。</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1000 880" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="mops-radar-arch-title mops-radar-arch-desc">
+        <title id="mops-radar-arch-title">MOPS 飆股雷達系統架構</title>
+        <desc id="mops-radar-arch-desc">TWSE/TPEx 收盤價經 fetch_prices.py 寫入 Supabase stock_prices，MOPS 公告經 scan 階段讀取股價算本益比並由 AI 分析後存進 pending_results.json，send 階段讀取快取推播 Telegram 與寫入 Google Sheet，全程由 Hermes 排程執行。</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+          </marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/>
+          </marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+        <!-- ============================= ZONES ============================= -->
+        <rect x="40" y="40" width="920" height="112" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <rect x="56" y="44" width="76" height="15" rx="2" fill="#f5f5f5"/>
+        <text x="94" y="55" fill="rgba(45,49,66,0.55)" font-size="11" font-weight="500" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">外部資料來源</text>
+
+        <rect x="40" y="192" width="920" height="448" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <rect x="56" y="196" width="150" height="15" rx="2" fill="#f5f5f5"/>
+        <text x="131" y="207" fill="rgba(45,49,66,0.55)" font-size="11" font-weight="500" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">Hermes 排程（Mac mini）</text>
+
+        <rect x="40" y="680" width="920" height="112" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <rect x="56" y="684" width="76" height="15" rx="2" fill="#f5f5f5"/>
+        <text x="94" y="695" fill="rgba(45,49,66,0.55)" font-size="11" font-weight="500" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">推播與存檔</text>
+
+        <!-- ============================= ARROWS ============================= -->
+
+        <!-- TWSE/TPEx -> fetch_prices.py -->
+        <line x1="220" y1="136" x2="220" y2="224" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <rect x="188" y="172" width="64" height="16" rx="2" fill="#f5f5f5"/>
+        <text x="220" y="184" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">收盤價</text>
+
+        <!-- MOPS公告 -> scan -->
+        <line x1="780" y1="136" x2="780" y2="320" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <rect x="716" y="220" width="128" height="16" rx="2" fill="#f5f5f5"/>
+        <text x="780" y="232" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">重大訊息公告清單</text>
+
+        <!-- fetch_prices.py -> stock_prices -->
+        <line x1="220" y1="288" x2="220" y2="320" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- stock_prices -> scan (cross-link) -->
+        <line x1="320" y1="360" x2="680" y2="360" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <rect x="452" y="336" width="96" height="16" rx="2" fill="#f5f5f5"/>
+        <text x="500" y="348" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">查股價算本益比</text>
+
+        <!-- scan -> pending_results.json -->
+        <path d="M 780,400 V 416 Q 780,424 772,424 H 508 Q 500,424 500,432 V 440"
+              fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <rect x="592" y="400" width="72" height="16" rx="2" fill="#f5f5f5"/>
+        <text x="628" y="412" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">存 cache</text>
+
+        <!-- pending_results.json -> send -->
+        <line x1="500" y1="504" x2="500" y2="544" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <rect x="464" y="512" width="72" height="16" rx="2" fill="#f5f5f5"/>
+        <text x="500" y="524" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">讀 cache</text>
+
+        <!-- send -> Telegram -->
+        <path d="M 500,608 V 644 Q 500,652 492,652 H 268 Q 260,652 260,660 V 696"
+              fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <rect x="364" y="628" width="32" height="16" rx="2" fill="#f5f5f5"/>
+        <text x="380" y="640" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">推播</text>
+
+        <!-- send -> Google Sheet -->
+        <path d="M 500,608 V 644 Q 500,652 508,652 H 772 Q 780,652 780,660 V 696"
+              fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <rect x="624" y="628" width="80" height="16" rx="2" fill="#f5f5f5"/>
+        <text x="664" y="640" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">寫入試算表</text>
+
+        <!-- ============================= NODES ============================= -->
+
+        <!-- TWSE/TPEx (external) -->
+        <rect x="120" y="72" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="120" y="72" width="200" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="128" y="78" width="30" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)" stroke-width="0.8"/>
+        <text x="143" y="87" fill="#4f5d75" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
+        <text x="220" y="106" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">TWSE／TPEx</text>
+        <text x="220" y="122" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">開放資料 API</text>
+
+        <!-- MOPS公告 (external) -->
+        <rect x="680" y="72" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="680" y="72" width="200" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="688" y="78" width="34" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)" stroke-width="0.8"/>
+        <text x="705" y="87" fill="#4f5d75" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">WEB</text>
+        <text x="780" y="106" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">MOPS 公告網站</text>
+        <text x="780" y="122" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">重大訊息 · html 解析</text>
+
+        <!-- fetch_prices.py (step) -->
+        <rect x="120" y="224" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="120" y="224" width="200" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="128" y="230" width="36" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="146" y="239" fill="#2d3142" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">CRON</text>
+        <text x="220" y="258" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">fetch_prices.py</text>
+        <text x="220" y="274" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">local clone · 14:15+</text>
+
+        <!-- stock_prices (FOCAL / store) -->
+        <rect x="120" y="320" width="200" height="80" rx="6" fill="#f5f5f5"/>
+        <rect x="120" y="320" width="200" height="80" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+        <rect x="128" y="326" width="24" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.50)" stroke-width="0.8"/>
+        <text x="140" y="335" fill="#eb6c36" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">DB</text>
+        <text x="220" y="360" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">Supabase</text>
+        <text x="220" y="376" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">stock_prices</text>
+        <text x="220" y="392" fill="#eb6c36" font-size="10" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">跨系統共用表</text>
+
+        <!-- scan (step) -->
+        <rect x="680" y="320" width="200" height="80" rx="6" fill="#f5f5f5"/>
+        <rect x="680" y="320" width="200" height="80" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="688" y="326" width="36" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="706" y="335" fill="#2d3142" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">CRON</text>
+        <text x="780" y="354" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">mops_radar.py scan</text>
+        <text x="780" y="370" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">runner.py wrap · 00:30</text>
+        <text x="780" y="386" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">OpenRouter AI 分析</text>
+
+        <!-- pending_results.json (store) -->
+        <rect x="400" y="440" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="400" y="440" width="200" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+        <rect x="408" y="446" width="36" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+        <text x="426" y="455" fill="#4f5d75" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">JSON</text>
+        <text x="500" y="474" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">pending_results.json</text>
+        <text x="500" y="490" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">scan → send 交接</text>
+
+        <!-- send (step) -->
+        <rect x="400" y="544" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="400" y="544" width="200" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="408" y="550" width="36" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="426" y="559" fill="#2d3142" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">CRON</text>
+        <text x="500" y="578" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">mops_radar.py send</text>
+        <text x="500" y="594" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">07:00 · 送完清 cache</text>
+
+        <!-- Telegram (external) -->
+        <rect x="160" y="696" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="160" y="696" width="200" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+        <rect x="168" y="702" width="24" height="12" rx="2" fill="transparent" stroke="rgba(122,131,153,0.4)" stroke-width="0.8"/>
+        <text x="180" y="711" fill="#7a8399" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">TG</text>
+        <text x="260" y="730" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">Telegram 推播</text>
+        <text x="260" y="746" fill="#4f5d75" font-size="9" font-family="'Geist','Noto Sans TC',sans-serif" text-anchor="middle">「飆股雷達」群組</text>
+
+        <!-- Google Sheet (external) -->
+        <rect x="680" y="696" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="680" y="696" width="200" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="688" y="702" width="42" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)" stroke-width="0.8"/>
+        <text x="709" y="711" fill="#4f5d75" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">SHEET</text>
+        <text x="780" y="730" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">Google Sheet</text>
+        <text x="780" y="746" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">gspread · service account</text>
+
+        <!-- ============================= ANNOTATION CALLOUTS ============================= -->
+        <text x="940" y="180" fill="#2d3142" font-size="14" font-style="italic" font-family="'Instrument Serif','Noto Serif TC',serif" text-anchor="end">scan 還在 Google Drive 上跑</text>
+        <path d="M 900 188 Q 916 250 868 320" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+        <circle cx="864" cy="326" r="2" fill="#2d3142"/>
+
+        <text x="60" y="440" fill="#2d3142" font-size="14" font-style="italic" font-family="'Instrument Serif','Noto Serif TC',serif" text-anchor="start">因子選股、投資系統也讀這張表</text>
+        <path d="M 80 448 Q 100 470 120 400" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+        <circle cx="120" cy="400" r="2" fill="#2d3142"/>
+
+        <!-- ============================= LEGEND ============================= -->
+        <line x1="40" y1="824" x2="960" y2="824" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <text x="40" y="838" fill="#4f5d75" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.14em">LEGEND</text>
+
+        <rect x="140" y="832" width="14" height="10" rx="2" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <text x="160" y="842" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif">外部系統</text>
+
+        <rect x="330" y="832" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="350" y="842" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif">Hermes 排程腳本</text>
+
+        <rect x="540" y="832" width="14" height="10" rx="2" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+        <text x="560" y="842" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif">本機檔案存放</text>
+
+        <rect x="750" y="832" width="14" height="10" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+        <text x="770" y="842" fill="#2d3142" font-size="12" font-family="'Geist','Noto Sans TC',sans-serif">跨系統共用資料</text>
+
+      </svg>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-dot ink"></span>
+          <h3>兩支腳本、兩個執行位置</h3>
+        </div>
+        <ul>
+          <li>fetch_prices.py：2026-09-07 起改跑本機 git clone</li>
+          <li>mops_radar.py（scan/send）：仍在 Google Drive，靠 runner 包一層避開掛載卡住</li>
+          <li>改 Google Drive 那份程式碼要記得同步回本機 clone</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-dot coral"></span>
+          <h3>scan / send 交接</h3>
+        </div>
+        <ul>
+          <li>scan（00:30）只分析存檔，不送出</li>
+          <li>send（07:00）讀 cache 送 Telegram，送完才刪</li>
+          <li>cache 還在 = send 失敗，資料沒丟，可補送</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-dot muted"></span>
+          <h3>防呆設計</h3>
+        </div>
+        <ul>
+          <li>runner.py：timeout + 最多 4 次重試（15/30/60s 退避）</li>
+          <li>股價一律查 Supabase，不讓 AI 自己編</li>
+          <li>Telegram HTML 標籤沒配對就降級純文字，避免整則被拒收</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer">
+      <span>mops-radar · github.com/Aze0419/mops-radar</span>
+      <span>2026-09-20</span>
+    </div>
+
+  </div>
+</body>
+</html>
