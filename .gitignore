@@ -6,3 +6,6 @@ google-sa.json
 
 # backup snapshots — 時間戳備份，不需版控
 *.bak-*
+
+# OTC 持續重試腳本的每日標記檔（fetch-prices-persistent-retry.sh）
+.otc_synced_*
