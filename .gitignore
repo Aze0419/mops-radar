@@ -9,3 +9,6 @@ google-sa.json
 
 # OTC 持續重試腳本的每日標記檔（fetch-prices-persistent-retry.sh）
 .otc_synced_*
+
+# mops_radar.py scan→send 交接用的 cache（2026-09-28 起產生在這裡）
+pending_results.json
