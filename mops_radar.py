@@ -23,6 +23,7 @@ RADAR_SHEET_NAME = "公告紀錄"
 SA_KEY_FILE      = os.environ.get("SA_KEY_FILE", "/Users/iroman/ai-hedge-fund-tw/google-sa.json")
 TZ               = ZoneInfo("Asia/Taipei")
 AI_MODEL         = "google/gemini-3.1-flash-lite-preview"
+EXCLUDE_CODES    = {"6949", "5904"}  # 沛爾生醫、寶雅：公告期間每天重發面額變更公告，使用者要求排除
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -629,10 +630,11 @@ def scan():
         else:
             print(f"  {code} 無詳細頁參數（非 6AM 排程時正常），使用清單頁說明")
 
-    # 篩選：說明含「每股盈餘」且符合條款為 51 或 53 款
+    # 篩選：排除 EXCLUDE_CODES，說明含「每股盈餘」且符合條款為 51 或 53 款
     matched = [
         a for a in announcements
-        if "每股盈餘" in a.get("說明", "")
+        if a.get("公司代號") not in EXCLUDE_CODES
+        and "每股盈餘" in a.get("說明", "")
         and ("51" in a.get("符合條款", "") or "53" in a.get("符合條款", ""))
     ]
     print(f"  符合條件：{len(matched)} 筆")
