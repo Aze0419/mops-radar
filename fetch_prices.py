@@ -31,6 +31,28 @@ def smart_date():
         d -= timedelta(days=1)
     return d
 
+def market_holiday_name(d):
+    """d 是證交所休市日就回傳假日名稱，否則回 None。
+    日曆來自 openapi.twse.com.tw（日期是民國年 1150928 格式）；名稱含「交易日」的是
+    開紅盤／封關那種照常交易的日子，要排除。查不到日曆時回 None 照常抓價（寧可白等，
+    也不要因為 API 掛掉就漏抓）。颱風假是臨時宣布的，不在日曆上，這裡擋不到。
+    """
+    try:
+        req = urllib.request.Request(
+            "https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule",
+            headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            rows = json.load(r)
+    except Exception as e:
+        print(f"  休市日曆查詢失敗（照常抓價）：{e}")
+        return None
+    roc = f"{d.year - 1911}{d.strftime('%m%d')}"
+    for row in rows:
+        name = row.get("Name", "")
+        if row.get("Date") == roc and "交易日" not in name:
+            return name
+    return None
+
 def fetch_tse(d):
     """上市：TWSE 官網 MI_INDEX JSON（response=csv 已確認會 404，只有 response=json 能用；
     2026-08-10 實測比官方 openapi.twse.com.tw 的 STOCK_DAY_ALL 更早有當天資料，當主力）
@@ -289,6 +311,12 @@ def refresh_factor_selection_latest(client):
 def main(tse_only=False):
     d = smart_date()
     print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] 抓取 {d.strftime('%Y-%m-%d')} 收盤價")
+
+    holiday = market_holiday_name(d)
+    if holiday:
+        # fetch-prices-persistent-retry.sh 靠「休市，不抓價」這幾個字判斷，改字要一起改
+        print(f"  {d.strftime('%Y-%m-%d')} {holiday}，休市，不抓價")
+        return
 
     print("  上市（TWSE）...")
     tse = fetch_with_retry(fetch_tse, d, "上市", fallback_fn=fetch_tse_openapi)

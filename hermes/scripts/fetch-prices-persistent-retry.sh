@@ -3,6 +3,7 @@
 # - 當天已補過（標記檔存在）→ 直接結束
 # - fetch_prices.py 本身掛掉（exit ≠ 0）→ 立刻告警
 # - TPEx 還沒發布（上櫃 0 筆）→ 靜默結束等下一格，只有最後一格（23:40 後）還沒補到才告警
+# - 證交所休市日（fetch_prices.py 印「休市，不抓價」）→ 寫標記檔，今天後面幾格都不用再跑
 MARKER="/Users/iroman/mops_radar/.otc_synced_$(date +%Y%m%d)"
 if [ -f "$MARKER" ]; then
     exit 0
@@ -10,6 +11,10 @@ fi
 cd /Users/iroman/mops_radar
 OUTPUT=$(/Users/iroman/.hermes/hermes-agent/venv/bin/python3 fetch_prices.py 2>&1)
 STATUS=$?
+if [ "$STATUS" -eq 0 ] && echo "$OUTPUT" | grep -q "休市，不抓價"; then
+    touch "$MARKER"
+    exit 0
+fi
 OTC_COUNT=$(echo "$OUTPUT" | awk '/上櫃（TPEX）\.\.\./{found=1} found && /→ [0-9]+ 筆/{print $2; exit}')
 if [ "$STATUS" -eq 0 ] && [ -n "$OTC_COUNT" ] && [ "$OTC_COUNT" -gt 0 ]; then
     touch "$MARKER"
