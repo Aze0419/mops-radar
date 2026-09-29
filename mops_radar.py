@@ -36,12 +36,6 @@ HEADERS = {
 }
 
 # ── 工具函式 ───────────────────────────────────────────────────────
-def http_get(url, headers=None, timeout=30):
-    h = {**HEADERS, **(headers or {})}
-    req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", errors="replace")
-
 def http_post(url, data, headers=None, timeout=30):
     h = {"Content-Type": "application/x-www-form-urlencoded", **HEADERS, **(headers or {})}
     body = urllib.parse.urlencode(data).encode()
@@ -120,16 +114,9 @@ def parse_announcement_list(html):
         subject = strip_tags(get(4))
         clause  = f"第{get(6)}款" if get(6) else ''
         fact8   = get(7)
+        # h?8 就是完整說明，跟「詳細資料」頁一字不差（2026-09-29 全天 243 則逐一比對），
+        # 不需要再另外抓詳細頁
         detail  = strip_tags(get(8))
-
-        # 抓 onclick 參數，供後續抓詳細頁
-        onclick_m = re.search(
-            r"SEQ_NO\.value='(\d+)'.*?SPOKE_TIME\.value='(\d+)'.*?SPOKE_DATE\.value='(\d+)'",
-            form, re.I | re.DOTALL
-        )
-        seq_no     = onclick_m.group(1) if onclick_m else ''
-        spoke_time = onclick_m.group(2) if onclick_m else ''
-        spoke_date = onclick_m.group(3) if onclick_m else ''
 
         if code or name or subject:
             t = pad6(time6)
@@ -142,54 +129,8 @@ def parse_announcement_list(html):
                 '符合條款':    clause,
                 '事實發生日':  yyyymmdd_to_iso(fact8),
                 '說明':        detail,
-                '_seq_no':     seq_no,
-                '_spoke_time': spoke_time,
-                '_spoke_date': spoke_date,
             })
     return out
-
-# ── 2b. 從 t05sr01_1 取得最新公告的 onclick 參數（SEQ_NO 等）─────
-def fetch_onclick_params():
-    """GET t05sr01_1（無日期參數）→ 解析 onclick SEQ_NO/SPOKE_TIME/SPOKE_DATE/COMPANY_ID。
-    早上 6 AM 時此頁面顯示的是昨日公告，與 fetch_announcements 查的日期吻合。"""
-    try:
-        html = http_get("https://mopsov.twse.com.tw/mops/web/t05sr01_1", timeout=30)
-    except Exception as e:
-        print(f"  t05sr01_1 取得失敗: {e}")
-        return {}
-    pattern = re.compile(
-        r"SEQ_NO\.value='(\d+)'.*?SPOKE_TIME\.value='(\d+)'.*?"
-        r"SPOKE_DATE\.value='(\d+)'.*?COMPANY_ID\.value='([^']+)'",
-        re.DOTALL
-    )
-    params = {}
-    for m in pattern.finditer(html):
-        seq_no, spoke_time, spoke_date, company_id = m.groups()
-        company_id = company_id.strip()
-        key = (company_id, spoke_date, spoke_time)  # 三元組：同日多筆各自保留
-        params[key] = (seq_no, spoke_time, spoke_date)
-    print(f"  t05sr01_1 onclick 參數：{len(params)} 筆")
-    return params
-
-# ── 2c. 抓公告詳細頁，取得完整「說明」────────────────────────────
-def fetch_detail(company_id, spoke_time, spoke_date, seq_no):
-    url = (f"https://mopsov.twse.com.tw/mops/web/ajax_t05sr01_1"
-           f"?firstin=true&stp=1&step=1"
-           f"&SEQ_NO={seq_no}&SPOKE_TIME={spoke_time}&SPOKE_DATE={spoke_date}&COMPANY_ID={company_id}")
-    for attempt in range(3):
-        try:
-            html = http_get(url, timeout=30)
-            m = re.search(r'<th[^>]*>說明</th>\s*<td[^>]*colspan=[\'"]?5[\'"]?[^>]*>([\s\S]*?)</td>', html, re.I)
-            if m:
-                return strip_tags(m.group(1))
-            m2 = re.search(r'<pre[^>]*>([\s\S]*?)</pre>', html, re.I)
-            if m2:
-                return strip_tags(m2.group(1))
-            # HTML 載入但 regex 未中，繼續下一次嘗試（不 sleep）
-        except Exception as e:
-            print(f"    詳細頁 retry {attempt+1}/3：{e}")
-            time.sleep(3)
-    return ''
 
 # ── 3. 取收盤價與成交量（Supabase stock_prices 每檔股票最新一筆）──
 _supabase_client = None
@@ -645,31 +586,6 @@ def scan():
     if not announcements:
         _save_cache({"empty": f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有公告", "items": []})
         return
-
-    # 從 t05sr01_1 取 onclick 參數（SEQ_NO 等），供詳細頁使用
-    print("取得公告 onclick 參數...")
-    onclick_params = fetch_onclick_params()
-
-    # 抓詳細頁，取得完整「說明」（在 EPS 過濾前執行，避免漏掉 EPS 只在詳細頁的公告）
-    print("抓取公告詳細內容...")
-    for ann in announcements:
-        code = ann['公司代號']
-        spoke_date8 = ann.get('發言日期', '').replace('-', '')
-        key = (code, spoke_date8, ann.get('_spoke_time', ''))
-        if key in onclick_params:
-            seq_no, spoke_time, spoke_date = onclick_params[key]
-            ann['_seq_no']     = seq_no
-            ann['_spoke_time'] = spoke_time
-            ann['_spoke_date'] = spoke_date
-        if ann.get('_seq_no') and ann.get('_spoke_time') and ann.get('_spoke_date'):
-            print(f"  抓詳細頁：{code} {ann['主旨'][:30]}")
-            detail = fetch_detail(code, ann['_spoke_time'], ann['_spoke_date'], ann['_seq_no'])
-            if detail:
-                ann['說明'] = detail
-                print(f"    說明長度：{len(detail)} 字")
-            time.sleep(2)
-        else:
-            print(f"  {code} 無詳細頁參數（非 6AM 排程時正常），使用清單頁說明")
 
     # 篩選：排除 EXCLUDE_CODES，說明含「每股盈餘」且符合條款為 51 或 53 款
     matched = [
