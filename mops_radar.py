@@ -24,6 +24,10 @@ SA_KEY_FILE      = os.environ.get("SA_KEY_FILE", os.path.join(os.path.dirname(os
 TZ               = ZoneInfo("Asia/Taipei")
 AI_MODEL         = "google/gemini-3.1-flash-lite-preview"
 EXCLUDE_CODES    = {"6949", "5904"}  # 沛爾生醫、寶雅：公告期間每天重發面額變更公告，使用者要求排除
+TYPESAFE_KEY     = os.environ.get("TYPESAFE_API_KEY", "")
+# 2026-09-29 用 10 個交易日實測：面額變更／更正歷年財報都 ≤ 0.06，真正的財務業務公告都 ≥ 0.42，
+# 中間沒有任何公告，門檻取 0.2 寧可多放不要漏訊號
+JEV_THRESHOLD    = float(os.environ.get("JEV_THRESHOLD", "0.2"))
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -438,6 +442,43 @@ def analyze(ann, price, pe, dashboard=None):
     start = raw.find('{'); end = raw.rfind('}') + 1
     return json.loads(raw[start:end]) if start >= 0 else {"display_text": raw, "ai_rating": "🟡 一般觀望"}
 
+# ── 5b. Jev 判斷公告是否真的在公布自家獲利 ──────────────────────────
+# 「說明含每股盈餘」會把面額變更、更正歷年財報這類只是順帶引用 EPS 的公告也抓進來。
+# 回傳機率（0~1）；沒 key 或呼叫失敗回 None，呼叫端一律放行，不能因為 Jev 掛掉漏訊號。
+JEV_QUESTION = {
+    "type": "noul",
+    "instructions": "這則台股重大訊息公告，主要是不是在公布公司自己最新一期（單月、單季或年度）的營收、損益或每股盈餘結果？",
+    "criteria": {
+        "true": "公告主體就是公司自己的獲利結果，例如自結損益、董事會通過財報、公布單月／單季每股盈餘。",
+        "false": "公告主體是別的事：面額變更、減資、增資、股利、合併收購、處分資產、背書保證、澄清媒體報導、法說會等，只是順帶引用每股盈餘或財務數字。",
+    },
+}
+
+def jev_earnings_prob(ann):
+    if not TYPESAFE_KEY:
+        return None
+    payload = {
+        "model": "jev-latest",
+        "state": {"announcement": {
+            "company": ann.get("公司名稱", ""), "subject": ann.get("主旨", ""),
+            "clause": ann.get("符合條款", ""), "description": ann.get("說明", "")[:2000],
+        }},
+        "questions": {"earnings": JEV_QUESTION},
+    }
+    for attempt in range(3):
+        try:
+            result = http_post_json("https://api.typesafe.ai/v1/systemone", payload,
+                                    headers={"Authorization": f"Bearer {TYPESAFE_KEY}"}, timeout=20)
+            return float(result["answers"]["earnings"]["noul"])
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 529) or attempt == 2:
+                print(f"  Jev 失敗（HTTP {e.code}），直接放行")
+                return None
+            time.sleep(2 * (attempt + 1))
+        except Exception as e:
+            print(f"  Jev 失敗：{e}，直接放行")
+            return None
+
 # ── 6. Telegram ───────────────────────────────────────────────────
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -638,6 +679,19 @@ def scan():
         and ("51" in a.get("符合條款", "") or "53" in a.get("符合條款", ""))
     ]
     print(f"  符合條件：{len(matched)} 筆")
+
+    # Jev 再過濾一次：關鍵字命中但其實不是在公布獲利的公告（面額變更等）剔除
+    if matched and TYPESAFE_KEY:
+        print(f"Jev 判斷是否為獲利公告（門檻 {JEV_THRESHOLD}）...")
+        kept = []
+        for a in matched:
+            p = jev_earnings_prob(a)
+            if p is not None and p < JEV_THRESHOLD:
+                print(f"  ✂ {p:.2f} {a['公司代號']} {a['主旨'][:40]}")
+                continue
+            kept.append(a)
+        print(f"  Jev 過濾後：{len(kept)} 筆（剔除 {len(matched) - len(kept)} 筆）")
+        matched = kept
 
     if not matched:
         _save_cache({"empty": f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有符合訊號的公告", "items": []})

@@ -25,5 +25,6 @@ TWSE/TPEX 收盤價寫回 Supabase `stock_prices`（`fetch_prices.py`，因子�
 - **`pending_results.json` 產生在這個目錄**（已 gitignore）。GDrive 那份目錄底下若又出現新的 cache，代表有腳本還指著舊路徑。
 - **AI 產生的 `display_text` 不保證 HTML 標籤配對。** Telegram 用 `parse_mode: HTML` 時只要有一個 `<b>` 沒閉合，整則直接 400 拒收、當天全部訊號一起陣亡。組訊息前要檢查標籤配對，不合就降級成純文字。
 - **休市日由 `fetch_prices.py` 自己擋。** 開跑先查證交所休市日曆（`market_holiday_name()`），休市就印「休市，不抓價」、exit 0，`fetch-prices-persistent-retry.sh` 看到這幾個字會寫當天標記檔、不再重跑。cron 仍是週一到五固定觸發，不用改排程。日曆查不到時照常抓價；**颱風假不在日曆上，擋不到**，那天照樣會有 23:40 告警。
+- **Jev 只負責「刪」，而且失敗一律放行。** scan 的關鍵字篩完後，對每筆問 TypeSafe Jev「是不是在公布自家獲利」，機率 < `JEV_THRESHOLD`（預設 0.2）才剔除，log 會印 `✂ 機率 代號 主旨`。沒 `TYPESAFE_API_KEY`、401、逾時都照樣放行，不能因為 Jev 掛掉漏訊號。門檻 0.2 是 2026-09-29 用 10 個交易日實測定的：面額變更／更正歷年財報 ≤ 0.06、真正的財務業務公告 ≥ 0.42。沒收到某檔訊號時，先 grep log 裡的 `✂` 看是不是被 Jev 剔掉。
 - **股價與成交量一律查 Supabase `stock_prices`**，不要讓 AI 從公告內文自己編，也不要重新引入本機 json 快取。
 - **python 一律寫死 hermes-agent venv：`/Users/iroman/.hermes/hermes-agent/venv/bin/python3`**（系統 `/usr/bin/python3` 缺 gspread/supabase）。**不要**再加 `export PYTHONPATH="$HOME/Library/Python/3.9/lib/python/site-packages..."` 借舊套件：Hermes 背景自動更新會重建這顆 venv（2026-09-06 從 3.9 換成 3.11），借來的 cp39 `pydantic_core` 會讓 Supabase 讀取悄悄失敗、股價全變 0。
