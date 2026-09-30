@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """MOPS 飆股雷達：每日監控重大公告 + AI分析 → Telegram + Google Sheet"""
-import re, json, sys, time, unicodedata, urllib.request, urllib.parse, urllib.error
+import re, json, sys, time, traceback, unicodedata, urllib.request, urllib.parse, urllib.error
+from html import escape as html_escape
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -86,15 +87,28 @@ def _get_dashboard_row(code):
 
 # ── 2. 抓 MOPS 昨日公告清單 ───────────────────────────────────────
 def fetch_announcements(roc_year, month, day):
-    html = http_post(
-        "https://mopsov.twse.com.tw/mops/web/ajax_t05st02",
-        {"firstin": "true", "off": "1", "step": "1", "step00": "0",
-         "TYPEK": "all", "year": roc_year, "month": month, "day": day},
-        timeout=30
-    )
-    if '查無需求資料' in html:
+    for attempt in range(3):
+        try:
+            html = http_post(
+                "https://mopsov.twse.com.tw/mops/web/ajax_t05st02",
+                {"firstin": "true", "off": "1", "step": "1", "step00": "0",
+                 "TYPEK": "all", "year": roc_year, "month": month, "day": day},
+                timeout=30
+            )
+            break
+        except Exception as e:
+            if attempt == 2:
+                raise
+            print(f"  MOPS 連線失敗（{e}），{10 * (attempt + 1)} 秒後重試")
+            time.sleep(10 * (attempt + 1))
+    # 當天沒資料實際回的是「查無115/12/25之重大訊息資料」（2026-09-30 實測），不是「查無需求資料」
+    if re.search(r'查無.{0,20}資料', html):
         return []
-    return parse_announcement_list(html)
+    out = parse_announcement_list(html)
+    if not out:
+        # 被擋、改版或錯誤頁都會落到這裡，不能當成「今天沒有公告」送出去
+        raise RuntimeError(f"MOPS 回應既沒有公告也不是「查無資料」，可能被擋或改版：{strip_tags(html)[:200]}")
+    return out
 
 def parse_announcement_list(html):
     out = []
@@ -713,6 +727,7 @@ def sync_history(ann, price):
 # 每筆 item 各自記進度（gsheet_done／history_done／tg_sent），每做完一步就回寫 cache，
 # send 中途失敗重跑只補沒做完的步驟：公告紀錄 insert_row 沒有去重，重做一次就多一列、公告次數多算一次
 CACHE_FILE = _pl.Path(__file__).parent / "pending_results.json"
+LAST_SENT_FILE = _pl.Path(__file__).parent / ".last_sent"  # send 處理過 cache 的日期，用來分辨「今天已送過」跟「scan 沒跑」
 _ITEM_STEPS = ("gsheet_done", "history_done", "tg_sent")
 
 def _save_cache(data):
@@ -738,7 +753,16 @@ def scan():
     carry = _unfinished_items()
     if carry:
         print(f"上一輪 send 有 {len(carry)} 筆沒做完，併進這次一起送")
-    _scan(carry)
+    try:
+        _scan(carry)
+    except Exception as e:
+        # scan 沒寫 cache 的話，07:00 send 只會在 log 印「無待送結果」，Telegram 什麼都收不到。
+        # 把錯誤寫進 cache 交給 send 通知，再往上丟讓 cron 也記成失敗
+        traceback.print_exc()
+        _save_cache({"empty": None, "items": carry,
+                     "error": f"{type(e).__name__}: {e}"[:500],
+                     "failed_at": datetime.now(TZ).strftime('%Y-%m-%d %H:%M')})
+        raise
 
 def _scan(carry):
     now = datetime.now(TZ)
@@ -897,9 +921,24 @@ def _send_items(cache):
 def send_results():
     """回傳 False 代表有 item 沒做完（cache 保留），呼叫端要用非 0 結束讓 Hermes 看得到"""
     cache = _load_cache()
+    today = datetime.now(TZ).date().isoformat()
     if cache is None:
-        print("無待送結果（scan 尚未跑或已送出過）")
+        sent_today = LAST_SENT_FILE.exists() and LAST_SENT_FILE.read_text(encoding="utf-8").strip() == today
+        if sent_today:
+            print("無待送結果（今天已經送過）")
+        else:
+            send_telegram("⚠️ 飆股雷達：找不到今天的掃描結果（00:30 的 scan 可能沒跑或當掉），今天沒有訊號可送。"
+                          "\n請看 Hermes 上的 ~/mops-radar-run.log")
+            print("無待送結果，已送 Telegram 告警（scan 可能沒跑）")
         return True
+
+    if cache.get("error"):
+        # 錯誤訊息常帶 <urlopen error ...> 這種角括號，不跳脫的話 Telegram HTML 解析直接 400
+        send_telegram(f"⚠️ 飆股雷達：{cache.get('failed_at', '')} 掃描失敗，今天沒有新訊號。\n"
+                      f"原因：{html_escape(cache['error'])}\n請看 Hermes 上的 ~/mops-radar-run.log")
+        print(f"  ✅ Telegram 送出 scan 失敗通知：{cache['error']}")
+        cache["error"] = None
+        _save_cache(cache)
 
     if cache.get("empty"):
         send_telegram(cache["empty"])
@@ -915,9 +954,11 @@ def send_results():
         cache["items"] = left
         _save_cache(cache)
         print(f"\n⚠️ 還有 {len(left)} 筆 Sheet 沒同步成功，cache 保留：重跑 send 或等明天 scan 併入會只補 Sheet、不重送 Telegram")
+        LAST_SENT_FILE.write_text(today, encoding="utf-8")
         return False
     print(f"\n完成！共處理 {len(cache.get('items', []))} 筆")
     CACHE_FILE.unlink()
+    LAST_SENT_FILE.write_text(today, encoding="utf-8")
     return True
 
 if __name__ == "__main__":
