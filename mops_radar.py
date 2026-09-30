@@ -167,7 +167,7 @@ def fetch_prices(codes):
         try:
             resp = (
                 _get_supabase().table("stock_prices")
-                .select("close,volume")
+                .select("close,volume,date")
                 .eq("code", code)
                 .order("date", desc=True)
                 .limit(1)
@@ -177,9 +177,36 @@ def fetch_prices(codes):
             print(f"  Supabase 股價讀取失敗 {code}：{e}")
             continue
         if resp.data:
-            prices[code] = {"close": resp.data[0]["close"], "volume": resp.data[0]["volume"]}
+            r = resp.data[0]
+            prices[code] = {"close": r["close"], "volume": r["volume"], "date": r.get("date")}
     print(f"  讀 Supabase 股價：{len(prices)}/{len(codes)} 筆")
     return prices
+
+def _twse_closed_days():
+    """證交所休市日（ISO 日期字串集合）。日曆來自 openapi.twse.com.tw（日期是民國年 1150928 格式），
+    名稱含「交易日」的是開紅盤／封關那種照常交易的日子，要排除（跟 fetch_prices.py 的判斷一致）。
+    查不到回空集合，只跳過週末；颱風假是臨時宣布的，不在日曆上"""
+    try:
+        req = urllib.request.Request("https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule",
+                                     headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            rows = json.load(r)
+    except Exception as e:
+        print(f"  休市日曆查詢失敗（只跳過週末）：{e}")
+        return set()
+    closed = set()
+    for row in rows:
+        d = str(row.get("Date", ""))
+        if "交易日" not in row.get("Name", "") and re.fullmatch(r"\d{7}", d):
+            closed.add(f"{int(d[:3]) + 1911}-{d[3:5]}-{d[5:]}")
+    return closed
+
+def last_trading_day(today, closed):
+    """today 之前最近的一個交易日（不含 today）。scan 在 00:30 跑，股價最新應該就是這天"""
+    d = today - timedelta(days=1)
+    while d.weekday() >= 5 or d.isoformat() in closed:
+        d -= timedelta(days=1)
+    return d
 
 # ── 4. 預算本益比 ─────────────────────────────────────────────────
 def _parse_num(s):
@@ -381,7 +408,8 @@ JSON 欄位定義：
 
 若缺少關鍵數據（如 EPS），在 display_text 中標示缺資料，對應數值欄位填 null。"""
 
-def analyze(ann, price, pe, dashboard=None):
+def analyze(ann, price, pe, dashboard=None, price_date=None, expected_day=None):
+    """expected_day 有值代表股價過期（price_date 比最新交易日舊），要讓 AI 知道本益比用的是舊價"""
     v = lambda x: x if x is not None else '無'
     def dv(key):
         if dashboard is None:
@@ -403,7 +431,11 @@ def analyze(ann, price, pe, dashboard=None):
     no_growth = (NL + "注意：公告沒有 EPS 年增率，依評級標準不能視為「EPS 有成長」，也不要自行推估成長率。"
                  if pe['pre_monthly_eps_yoy'] is None else '')
     user_msg = (
-        f"請分析：\n股票：{ann['公司名稱']}（{ann['公司代號']}）\n股價：{price}元\n\n"
+        f"請分析：\n股票：{ann['公司名稱']}（{ann['公司代號']}）\n股價：{price}元"
+        + (f"（{price_date} 收盤" if price_date else "")
+        + (f"，不是最新交易日 {expected_day} 的價格，本益比可能已失真，請在風險提醒中說明）" if expected_day
+           else ("）" if price_date else ""))
+        + "\n\n"
         f"【系統預算値】\n"
         f"單月EPS：{v(pe['pre_monthly_eps'])}元｜年增率：{pct(pe['pre_monthly_eps_yoy'])}\n"
         f"單月營收：{v(pe['pre_monthly_revenue'])}百萬｜年增率：{pct(pe['pre_monthly_revenue_yoy'])}\n"
@@ -968,6 +1000,8 @@ def _scan(carry):
 
     print("抓取股價...")
     prices = fetch_prices([a['公司代號'] for a in matched])
+    # 股價只取 Supabase 最新一筆、不看日期的話，抓價失敗那天會悄悄拿前一天的價算本益比
+    expected_day = last_trading_day(now.date(), _twse_closed_days()).isoformat()
 
     items, ai_down_streak = [], 0
     for ann in matched:
@@ -977,7 +1011,11 @@ def _scan(carry):
         price = pv.get('close', 0)
         volume = pv.get('volume')
         volume_lots = round(volume / 1000) if volume is not None else None
-        print(f"\n處理 {code} {ann['公司名稱']}（股價 {price}，成交量 {volume_lots}張）")
+        price_date = pv.get('date')
+        price_stale = bool(price_date) and price_date < expected_day
+        print(f"\n處理 {code} {ann['公司名稱']}（股價 {price}，成交量 {volume_lots}張，{price_date} 收盤）")
+        if price_stale:
+            print(f"  ⚠️ 股價是 {price_date} 的，最新交易日應為 {expected_day}")
 
         fin = fins.get(id(ann)) or regex_financials(ann['說明'])
         pe = calc_pe(fin, price)
@@ -996,7 +1034,8 @@ def _scan(carry):
         else:
             print("  AI 分析中...")
             try:
-                ai = analyze(ann, price, pe, dashboard)
+                ai = analyze(ann, price, pe, dashboard,
+                             price_date=price_date, expected_day=expected_day if price_stale else None)
                 ai_down_streak = 0
                 if ai.get("model_used") != AI_MODEL:
                     print(f"  由備援模型 {ai.get('model_used')} 分析")
@@ -1013,7 +1052,8 @@ def _scan(carry):
                 print(f"  AI 失敗：{e}")
                 ai = {"display_text": f"AI分析失敗：{e}", "ai_rating": "🟡 一般觀望"}
 
-        items.append({"ann": ann, "price": price, "volume_lots": volume_lots, "ai": ai, "pe": pe})
+        items.append({"ann": ann, "price": price, "volume_lots": volume_lots, "ai": ai, "pe": pe,
+                      "price_date": price_date, "price_expected": expected_day if price_stale else None})
 
     _save_cache({"empty": None, "items": carry + items})
     print(f"\n分析完成，共 {len(items)} 筆" + (f"（另有前次未完成 {len(carry)} 筆）" if carry else "")
@@ -1043,10 +1083,15 @@ def _render_block(item):
     ann, ai = item["ann"], item["ai"]
     e = lambda v: html_escape(str(v), quote=False)
     volume_lots = item["volume_lots"]
+    md = lambda iso: f"{iso[5:7]}/{iso[8:10]}"
+    stale = (f"\n⚠️ 這是 {md(item['price_date'])} 的收盤價，最新交易日應為 {md(item['price_expected'])}"
+             f"（抓價可能失敗或個股停牌，本益比可能失真）"
+             if item.get("price_expected") and item.get("price_date") else "")
     return (f"📢【{e(ann['公司名稱'])}｜{e(ann['公司代號'])}】\n"
             f"📅 {e(ann['發言日期'])} {e(ann['發言時間'])}\n"
             f"📑 {e(ann['符合條款'])}\n"
-            f"💰 收盤價: {e(item['price'])} | 成交量: {e(volume_lots) if volume_lots is not None else '無資料'}\n\n"
+            f"💰 收盤價: {e(item['price'])} | 成交量: {e(volume_lots) if volume_lots is not None else '無資料'}"
+            f"{e(stale)}\n\n"
             f"🤖 <b>AI 分析：</b>\n"
             f"{ai_html_to_telegram(ai.get('display_text', ''))}")
 
