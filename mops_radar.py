@@ -708,14 +708,39 @@ def sync_history(ann, price):
     ws.update(f"H{new_row_num}", [[f"飆股雷達{today.strftime('%m/%d')}"]], value_input_option='RAW')
 
 # ── 主程式 ────────────────────────────────────────────────────────
-# 01:00 跑 scan()：抓公告+AI 分析，存 CACHE_FILE，不送 Telegram
-# 06:00 跑 send_results()：讀 CACHE_FILE 送 Telegram + 同步 Sheet
+# 00:30 跑 scan()：抓公告+AI 分析，存 CACHE_FILE，不送 Telegram
+# 07:00 跑 send_results()：讀 CACHE_FILE 同步 Sheet + 送 Telegram
+# 每筆 item 各自記進度（gsheet_done／history_done／tg_sent），每做完一步就回寫 cache，
+# send 中途失敗重跑只補沒做完的步驟：公告紀錄 insert_row 沒有去重，重做一次就多一列、公告次數多算一次
 CACHE_FILE = _pl.Path(__file__).parent / "pending_results.json"
+_ITEM_STEPS = ("gsheet_done", "history_done", "tg_sent")
 
 def _save_cache(data):
-    CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False))
+    tmp = CACHE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(CACHE_FILE)  # 寫到一半中斷不會留下半個 JSON
+
+def _load_cache():
+    return json.loads(CACHE_FILE.read_text(encoding="utf-8")) if CACHE_FILE.exists() else None
+
+def _item_done(item):
+    return all(item.get(k) for k in _ITEM_STEPS)
+
+def _unfinished_items():
+    """上一輪 send 沒做完的 item（Telegram 沒送出或 Sheet 失敗），下一次 scan 要帶著走，不能被新結果蓋掉"""
+    old = _load_cache()
+    carry = [i for i in (old or {}).get("items", []) if not _item_done(i)]
+    for i in carry:
+        i["carried"] = True
+    return carry
 
 def scan():
+    carry = _unfinished_items()
+    if carry:
+        print(f"上一輪 send 有 {len(carry)} 筆沒做完，併進這次一起送")
+    _scan(carry)
+
+def _scan(carry):
     now = datetime.now(TZ)
     days_back_list = [3, 2, 1] if now.weekday() == 0 else [1]  # 星期一補查上星期五六日三天，其他查前一天
     target_dates = [now - timedelta(days=d) for d in days_back_list]
@@ -731,7 +756,7 @@ def scan():
     print(f"  公告總數：{len(announcements)} 筆")
 
     if not announcements:
-        _save_cache({"empty": f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有公告", "items": []})
+        _save_cache({"empty": f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有公告", "items": carry})
         return
 
     # 篩選：排除 EXCLUDE_CODES，說明含「每股盈餘」且符合條款為 51 或 53 款
@@ -760,7 +785,7 @@ def scan():
         matched = kept
 
     if not matched:
-        _save_cache({"empty": f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有符合訊號的公告", "items": []})
+        _save_cache({"empty": f"📭 今日（{now.strftime('%Y/%m/%d')}）沒有符合訊號的公告", "items": carry})
         return
 
     print("抓取股價...")
@@ -793,83 +818,114 @@ def scan():
 
         items.append({"ann": ann, "price": price, "volume_lots": volume_lots, "ai": ai, "pe": pe})
 
-    _save_cache({"empty": None, "items": items})
-    print(f"\n分析完成，共 {len(items)} 筆，等 06:00 送出")
+    _save_cache({"empty": None, "items": carry + items})
+    print(f"\n分析完成，共 {len(items)} 筆" + (f"（另有前次未完成 {len(carry)} 筆）" if carry else "")
+          + "，等 07:00 送出")
 
-def send_results():
-    if not CACHE_FILE.exists():
-        print("無待送結果（scan 尚未跑或已送出過）")
-        return
-    cache = json.loads(CACHE_FILE.read_text())
+def _render_block(item):
+    ann, ai = item["ann"], item["ai"]
+    code, price, volume_lots = ann['公司代號'], item["price"], item["volume_lots"]
+    display_text = ai.get('display_text', '')
+    if display_text.count('<b>') != display_text.count('</b>'):
+        # AI 偶爾漏打閉合標籤，標籤沒配對會讓 Telegram HTML 解析整則失敗，寧可拿掉粗體也要送得出去
+        display_text = display_text.replace('<b>', '').replace('</b>', '')
+    return (f"📢【{ann['公司名稱']}｜{code}】\n"
+            f"📅 {ann['發言日期']} {ann['發言時間']}\n"
+            f"📑 {ann['符合條款']}\n"
+            f"💰 收盤價: {price} | 成交量: {volume_lots if volume_lots is not None else '無資料'}\n\n"
+            f"🤖 <b>AI 分析：</b>\n"
+            f"{display_text}")
 
-    if cache.get("empty"):
-        send_telegram(cache["empty"])
-        print("  ✅ Telegram 送出（無符合公告）")
-        CACHE_FILE.unlink()
-        return
-
-    items = cache.get("items", [])
-    blocks = []
-    for item in items:
+def _sync_sheets(cache):
+    for item in cache.get("items", []):
         ann, ai, pe = item["ann"], item["ai"], item["pe"]
-        code, price, volume_lots = ann['公司代號'], item["price"], item["volume_lots"]
+        rating = ai.get('ai_rating', '')
+        if not item.get("gsheet_done"):
+            if rating in ('🔴 強烈買進', '🟠 建議買進'):
+                try:
+                    sync_gsheet(ann, ai, pe, item["price"], item["volume_lots"])
+                    item["gsheet_done"] = True
+                    print(f"  ✅ Google Sheet 同步 {ann['公司代號']}")
+                except Exception as e:
+                    print(f"  Google Sheet 失敗 {ann['公司代號']}：{e}")
+            else:
+                item["gsheet_done"] = True
+                print(f"  略過 Google Sheet {ann['公司代號']}（{rating}）")
+            _save_cache(cache)
+        if not item.get("history_done"):
+            if rating == '🔴 強烈買進':
+                try:
+                    sync_history(ann, item["price"])
+                    item["history_done"] = True
+                    print(f"  ✅ 歷史紀錄同步 {ann['公司代號']}")
+                except Exception as e:
+                    print(f"  歷史紀錄失敗 {ann['公司代號']}：{e}")
+            else:
+                item["history_done"] = True
+            _save_cache(cache)
 
-        display_text = ai.get('display_text', '')
-        if display_text.count('<b>') != display_text.count('</b>'):
-            # AI 偶爾漏打閉合標籤，標籤沒配對會讓 Telegram HTML 解析整則失敗，寧可拿掉粗體也要送得出去
-            display_text = display_text.replace('<b>', '').replace('</b>', '')
-
-        blocks.append(f"📢【{ann['公司名稱']}｜{code}】\n"
-                      f"📅 {ann['發言日期']} {ann['發言時間']}\n"
-                      f"📑 {ann['符合條款']}\n"
-                      f"💰 收盤價: {price} | 成交量: {volume_lots if volume_lots is not None else '無資料'}\n\n"
-                      f"🤖 <b>AI 分析：</b>\n"
-                      f"{display_text}")
-
-        if ai.get('ai_rating', '') in ('🔴 強烈買進', '🟠 建議買進'):
-            try:
-                sync_gsheet(ann, ai, pe, price, volume_lots)
-                print("  ✅ Google Sheet 同步")
-            except Exception as e:
-                print(f"  Google Sheet 失敗：{e}")
-        else:
-            print(f"  略過 Google Sheet（{ai.get('ai_rating')}）")
-
-        if ai.get('ai_rating', '') == '🔴 強烈買進':
-            try:
-                sync_history(ann, price)
-                print("  ✅ 歷史紀錄同步")
-            except Exception as e:
-                print(f"  歷史紀錄失敗：{e}")
-
+def _send_items(cache):
+    pending = [i for i in cache.get("items", []) if not i.get("tg_sent")]
+    if not pending:
+        return
     # 依「整個公司區塊」分批送出（不可用 send_telegram 內建的逐字切段，
     # 那個切法不管 HTML tag 有沒有被切斷，長訊息會讓 Telegram 回 400）
     SEP, LIMIT = "\n\n━━━━━━━━━━\n\n", 3800
     batches, cur, cur_len = [], [], 0
-    for b in blocks:
+    for item in pending:
+        b = _render_block(item)
         add_len = len(b) + (len(SEP) if cur else 0)
         if cur and cur_len + add_len > LIMIT:
-            batches.append(SEP.join(cur))
+            batches.append(cur)
             cur, cur_len = [], 0
-        cur.append(b)
+        cur.append((item, b))
         cur_len += len(b) + (len(SEP) if len(cur) > 1 else 0)
     if cur:
-        batches.append(SEP.join(cur))
+        batches.append(cur)
 
-    title = f"📊 今日符合條件公告（{len(items)} 筆）"
-    for i, batch in enumerate(batches, 1):
-        prefix = title + (f"（{i}/{len(batches)}）" if len(batches) > 1 else "") + "\n\n"
-        send_telegram(prefix + batch)
-    print(f"  ✅ Telegram 送出（{len(items)} 筆，分 {len(batches)} 則）")
+    carried = sum(1 for i in pending if i.get("carried"))
+    title = (f"📊 今日符合條件公告（{len(pending)} 筆"
+             + (f"，含前次沒送出的 {carried} 筆" if carried else "") + "）")
+    for n, batch in enumerate(batches, 1):
+        prefix = title + (f"（{n}/{len(batches)}）" if len(batches) > 1 else "") + "\n\n"
+        send_telegram(prefix + SEP.join(b for _, b in batch))
+        for item, _ in batch:
+            item["tg_sent"] = True
+        _save_cache(cache)  # 一則送出就記下來，後面那則失敗重跑不會重送前面的
+    print(f"  ✅ Telegram 送出（{len(pending)} 筆，分 {len(batches)} 則）")
 
-    print(f"\n完成！共送出 {len(items)} 筆")
+def send_results():
+    """回傳 False 代表有 item 沒做完（cache 保留），呼叫端要用非 0 結束讓 Hermes 看得到"""
+    cache = _load_cache()
+    if cache is None:
+        print("無待送結果（scan 尚未跑或已送出過）")
+        return True
+
+    if cache.get("empty"):
+        send_telegram(cache["empty"])
+        print("  ✅ Telegram 送出（無符合公告）")
+        cache["empty"] = None
+        _save_cache(cache)
+
+    _sync_sheets(cache)
+    _send_items(cache)
+
+    left = [i for i in cache.get("items", []) if not _item_done(i)]
+    if left:
+        cache["items"] = left
+        _save_cache(cache)
+        print(f"\n⚠️ 還有 {len(left)} 筆 Sheet 沒同步成功，cache 保留：重跑 send 或等明天 scan 併入會只補 Sheet、不重送 Telegram")
+        return False
+    print(f"\n完成！共處理 {len(cache.get('items', []))} 筆")
     CACHE_FILE.unlink()
+    return True
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "scan"
     if mode == "scan":
         scan()
     elif mode == "send":
-        send_results()
+        if not send_results():
+            sys.exit(1)
     else:
         sys.exit(f"未知模式：{mode}（用 scan 或 send）")

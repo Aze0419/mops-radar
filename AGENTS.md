@@ -21,7 +21,7 @@ TWSE/TPEX 收盤價寫回 Supabase `stock_prices`（`fetch_prices.py`，因子�
   **部署 = 這裡 commit+push（或 git pull），不用再同步 GDrive**；GDrive 那份只是舊檔，
   不要再改它，也不要再把任何排程指回去。`.env` 放這裡（不進 git）。
 - **scan 與 send 是兩支獨立 cron，靠 `pending_results.json` 交接。** `mops_radar.py scan`（00:30）只分析存檔不送出；`mops_radar.py send`（07:00）才送 Telegram 並在送完刪 cache。CLI 沒帶參數預設是 `scan`——歷史上就發生過 send 腳本掉了參數，結果每天靜靜重跑 scan 從沒送出過。
-- **cache 還在 = send 失敗，資料沒丟。** 沒收到訊號時先看 `~/mops-radar-send-run.log`，再看 `pending_results.json` 是否留著；留著就能補送，不用重跑 scan。
+- **cache 還在 = send 失敗，資料沒丟；重跑 send 只補沒做完的步驟。** 每筆 item 各自記 `gsheet_done`／`history_done`／`tg_sent`，每做完一步就回寫 cache。以前 send 先寫 Sheet 再送 Telegram，Telegram 一失敗重跑就把「公告紀錄」多插一列、公告次數多算一次（`sync_gsheet` 的 insert_row 沒去重）。Sheet 同步失敗時 send 會 exit 1 並只留那幾筆在 cache。**隔天 00:30 的 scan 也不會蓋掉沒做完的 item**，會標 `carried` 併進新 cache，Telegram 標題註明「含前次沒送出的 N 筆」、已送過的只補 Sheet。沒收到訊號時先看 `~/mops-radar-send-run.log`，再看 `pending_results.json` 是否留著；留著就直接重跑 send，不用重跑 scan。
 - **`pending_results.json` 產生在這個目錄**（已 gitignore）。GDrive 那份目錄底下若又出現新的 cache，代表有腳本還指著舊路徑。
 - **AI 產生的 `display_text` 不保證 HTML 標籤配對。** Telegram 用 `parse_mode: HTML` 時只要有一個 `<b>` 沒閉合，整則直接 400 拒收、當天全部訊號一起陣亡。組訊息前要檢查標籤配對，不合就降級成純文字。
 - **休市日由 `fetch_prices.py` 自己擋。** 開跑先查證交所休市日曆（`market_holiday_name()`），休市就印「休市，不抓價」、exit 0，`fetch-prices-persistent-retry.sh` 看到這幾個字會寫當天標記檔、不再重跑。cron 仍是週一到五固定觸發，不用改排程。日曆查不到時照常抓價；**颱風假不在日曆上，擋不到**，那天照樣會有 23:40 告警。

@@ -12,3 +12,4 @@ google-sa.json
 
 # mops_radar.py scan→send 交接用的 cache（2026-09-28 起產生在這裡）
 pending_results.json
+pending_results.tmp
