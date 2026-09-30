@@ -188,3 +188,10 @@ def test_enforce_growth_data(m, rating, eps_yoy, rev_yoy, want):
         assert note is None and ai["display_text"] == "<b>分析</b>"
     else:
         assert rating in note and want in note and ai["display_text"].endswith(note)
+
+
+def test_prompt_does_not_ask_for_web_search(m):
+    # OpenRouter request 沒開 web search，prompt 要求搜尋只會逼 AI 編新聞（2026-09-30 拿掉）
+    p = m.SYSTEM_PROMPT
+    assert "必須搜尋" not in p and "搜尋確認" not in p and "最新網路資訊" not in p
+    assert "你沒有網路搜尋能力" in p and "公告未說明原因" in p
