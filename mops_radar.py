@@ -393,18 +393,63 @@ def analyze(ann, price, pe, dashboard=None):
         + f"\n公告內容：\n{ann['說明'][:3000]}"
         + "\n\n（收盤價與成交量已顯示在訊息開頭，display_text 不需要再重複列出這兩項）"
     )
-    result = http_post_json(
-        "https://openrouter.ai/api/v1/chat/completions",
-        {"model": AI_MODEL, "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": user_msg}
-        ]},
-        headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
-        timeout=120
-    )
-    raw = result["choices"][0]["message"]["content"]
+    raw = openrouter_chat([
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": user_msg}
+    ])
     start = raw.find('{'); end = raw.rfind('}') + 1
     return json.loads(raw[start:end]) if start >= 0 else {"display_text": raw, "ai_rating": "🟡 一般觀望"}
+
+RATINGS = ("🔴 強烈買進", "🟠 建議買進", "🟡 一般觀望", "🟢 需要小心")
+
+def normalize_rating(ai):
+    """把 AI 回的評級對回四個標準字串。send 用完全相等比對決定要不要寫 Sheet，
+    AI 少一個空格（「🔴強烈買進」）或多個字就會悄悄不寫。先看 ai_rating 再看 display_text 開頭
+    （第 1 段規定以燈號開頭）；同一段字先比燈號、再比中文，都對不到才當一般觀望"""
+    for text in (str(ai.get("ai_rating") or ""), str(ai.get("display_text") or "")[:80]):
+        for r in RATINGS:
+            if r[0] in text:
+                return r
+        for r in RATINGS:
+            if r[2:] in text:
+                return r
+    return "🟡 一般觀望"
+
+class AIUnavailable(Exception):
+    """重試用完仍失敗（逾時、連線、429、5xx），scan 用來判斷要不要熔斷"""
+
+_RETRYABLE_HTTP = {408, 429, 500, 502, 503, 504, 529}
+
+def openrouter_chat(messages, attempts=3):
+    """只重試「重試有機會好」的錯誤；400 這種請求本身有問題的直接拋出，並把 OpenRouter 回的
+    錯誤內容帶進訊息（2026-08 那三次 400 只留下 Bad Request，看不出原因）"""
+    last = None
+    for attempt in range(attempts):
+        try:
+            result = http_post_json(
+                "https://openrouter.ai/api/v1/chat/completions",
+                {"model": AI_MODEL, "messages": messages},
+                headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
+                timeout=60,  # flash-lite 平常幾秒就回，每筆最多 3 次，要留在 Hermes 單次執行上限內
+            )
+            if not result.get("choices"):
+                # OpenRouter 上游模型出錯時可能回 200 + {"error": ...}
+                raise AIUnavailable(f"OpenRouter 沒回 choices：{str(result.get('error', result))[:300]}")
+            return result["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:300]
+            if e.code not in _RETRYABLE_HTTP:
+                raise RuntimeError(f"OpenRouter HTTP {e.code}：{body}") from e
+            last = AIUnavailable(f"OpenRouter HTTP {e.code}：{body}")
+        except AIUnavailable as e:
+            last = e
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            last = AIUnavailable(f"OpenRouter 連線失敗：{e}")
+        if attempt < attempts - 1:
+            wait = 5 * 3 ** attempt  # 5 秒、15 秒
+            print(f"  {last}，{wait} 秒後重試（{attempt + 2}/{attempts}）")
+            time.sleep(wait)
+    raise last
 
 # ── 5b. Jev 判斷公告是否真的在公布自家獲利 ──────────────────────────
 # 「說明含每股盈餘」會把面額變更、更正歷年財報這類只是順帶引用 EPS 的公告也抓進來。
@@ -815,7 +860,7 @@ def _scan(carry):
     print("抓取股價...")
     prices = fetch_prices([a['公司代號'] for a in matched])
 
-    items = []
+    items, ai_down_streak = [], 0
     for ann in matched:
         code = ann['公司代號']
         ann['公司名稱'] = ann['公司名稱'] or code
@@ -833,12 +878,25 @@ def _scan(carry):
               + (f"｜信心 {fin['confidence']}" if fin.get('confidence') else ''))
         print(f"  預估本益比：{pe['pre_pe_note']}")
 
-        print("  AI 分析中...")
-        try:
-            ai = analyze(ann, price, pe, dashboard)
-        except Exception as e:
-            print(f"  AI 失敗：{e}")
-            ai = {"display_text": f"AI分析失敗：{e}", "ai_rating": "🟡 一般觀望"}
+        if ai_down_streak >= 2:
+            # OpenRouter 整個掛掉時，每筆都重試到底會拖過 Hermes 執行上限、整個 scan 被砍、連 cache 都沒寫
+            print("  OpenRouter 連續 2 筆重試用完都失敗，這筆略過 AI 分析")
+            ai = {"display_text": "AI分析失敗：OpenRouter 暫時無法使用（前面連續失敗，這筆未重試）",
+                  "ai_rating": "🟡 一般觀望"}
+        else:
+            print("  AI 分析中...")
+            try:
+                ai = analyze(ann, price, pe, dashboard)
+                ai_down_streak = 0
+                rating = normalize_rating(ai)
+                if ai.get("ai_rating") != rating:
+                    print(f"  評級字串不標準「{ai.get('ai_rating')}」→ 視為 {rating}")
+                    ai["ai_rating"] = rating
+            except Exception as e:
+                if isinstance(e, AIUnavailable):
+                    ai_down_streak += 1
+                print(f"  AI 失敗：{e}")
+                ai = {"display_text": f"AI分析失敗：{e}", "ai_rating": "🟡 一般觀望"}
 
         items.append({"ann": ann, "price": price, "volume_lots": volume_lots, "ai": ai, "pe": pe})
 
