@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """MOPS 飆股雷達：每日監控重大公告 + AI分析 → Telegram + Google Sheet"""
-import re, json, sys, time, urllib.request, urllib.parse, urllib.error
+import re, json, sys, time, unicodedata, urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -172,7 +172,10 @@ def _parse_num(s):
     except (ValueError, TypeError):
         return None
 
-def calc_pe(detail, price):
+def regex_financials(detail):
+    """舊的規則式抽取，只剩 Jev 不可用時的備援。
+    只有「注意交易資訊」那種固定表格抓得對；自結損益的自由文字（金融股居多）會把
+    累計 EPS 當單月、或從主旨裡的「每股盈餘」開始抓到淨利（遠東銀 462717）。"""
     nums, pcts = [], []
     block = re.search(r'每股盈餘[\s\S]*', detail)
     if block:
@@ -198,6 +201,11 @@ def calc_pe(detail, price):
         m_rev = rn[0] if rn else None
         r_yoy = rp[0] if rp else None
 
+    return {'m_eps': m_eps, 'm_yoy': m_yoy, 'q_eps': q_eps, 'm_rev': m_rev, 'r_yoy': r_yoy,
+            'source': 'regex'}
+
+def calc_pe(fin, price):
+    m_eps, q_eps = fin['m_eps'], fin['q_eps']
     eps, mult, src = m_eps, 12, '月'
     if eps is None:
         eps, mult, src = q_eps, 4, '季'
@@ -208,10 +216,11 @@ def calc_pe(detail, price):
                 ('無股價資料' if not price else '無EPS資料')))
     return {
         'pre_monthly_eps':         m_eps,
-        'pre_monthly_eps_yoy':     m_yoy,
+        'pre_monthly_eps_yoy':     fin['m_yoy'],
         'pre_quarterly_eps':       q_eps,
-        'pre_monthly_revenue':     m_rev,
-        'pre_monthly_revenue_yoy': r_yoy,
+        'pre_monthly_revenue':     fin['m_rev'],
+        'pre_monthly_revenue_yoy': fin['r_yoy'],
+        'pre_extract_source':      fin['source'],
         'pre_eps_source':          src,
         'pre_annual_eps':          annual,
         'pre_pe':                  pe,
@@ -385,7 +394,7 @@ def analyze(ann, price, pe, dashboard=None):
 
 # ── 5b. Jev 判斷公告是否真的在公布自家獲利 ──────────────────────────
 # 「說明含每股盈餘」會把面額變更、更正歷年財報這類只是順帶引用 EPS 的公告也抓進來。
-# 回傳機率（0~1）；沒 key 或呼叫失敗回 None，呼叫端一律放行，不能因為 Jev 掛掉漏訊號。
+# 這題跟 5c 的財務數字抽取在 jev_judge() 同一個 request 一起問。
 JEV_QUESTION = {
     "type": "noul",
     "instructions": "這則台股重大訊息公告，主要是不是在公布公司自己最新一期（單月、單季或年度）的營收、損益或每股盈餘結果？",
@@ -395,30 +404,168 @@ JEV_QUESTION = {
     },
 }
 
-def jev_earnings_prob(ann):
-    if not TYPESAFE_KEY:
+# ── 5c. Jev 從公告數字裡挑 EPS／營收（程式列候選，Jev 只能挑不能編）──────
+# 跟 5b 同一份 state、同一個 request 一起問。候選是公告裡每個數字（依出現順序編號），
+# 附上所在那一行讓 Jev 看得到欄位名稱；Jev 回的一定是其中一個原樣數字，或「無」。
+JEV_DESC_LIMIT = 4000
+_NUM_RE = re.compile(r'[（(]?-?\d[\d,]*(?:\.\d+)?[)）]?%?')
+_NOT_VALUE_SUFFIX = tuple('年月日季條款項點/')
+JEV_NONE = "無"
+REV_UNITS = {"元": 1e-6, "仟元": 1e-3, "百萬元": 1, "億元": 100}  # 換算成百萬
+# 2026-09-30 用 5 天 31 則實測：挑對的非空答案信心都 ≥ 0.93，挑錯的（單季 EPS 誤拿單月數字）
+# 在 0.57~0.70；低於門檻當作沒資料，寧可缺 EPS 也不要錯的 EPS 算出假本益比
+JEV_MIN_CONF = float(os.environ.get("JEV_MIN_CONF", "0.8"))
+
+_BLANKS = ' \t　'
+
+def _disp_width(s):
+    return sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in s)
+
+def _column_header(text, ls, start, end, max_lines=15):
+    """表格數字往上找同一欄（依顯示寬度對齊，全形字算 2 格）的標題文字，碰到非表格行就停。
+    高雄銀那種「本月份」欄空白、EPS 只填在「累計」欄的表，光看所在行分不出是哪一欄。"""
+    col_s = _disp_width(text[ls:start])
+    col_e = col_s + _disp_width(text[start:end])
+    parts, pos = [], ls
+    for _ in range(max_lines):
+        if pos == 0:
+            break
+        prev_s = text.rfind('\n', 0, pos - 1) + 1
+        line, pos = text[prev_s:pos - 1], prev_s
+        if re.fullmatch(r'[\s=＝\-─—═_]*', line):
+            continue  # 空行、分隔線
+        body = line.strip()
+        if len(body) > 20 and line[:1] not in _BLANKS and not re.search(r'[ \t　]{2,}', body):
+            break  # 頂格、沒有欄位空白的「2.發生緣由:…」這種內文，表頭到此為止（表頭列通常縮排）
+        for run in re.finditer(r'[^ \t　]+', line):
+            rs = _disp_width(line[:run.start()])
+            re_ = rs + _disp_width(run.group())
+            word = run.group()
+            if rs <= col_e and re_ >= col_s and not _NUM_RE.fullmatch(word) \
+                    and re.search(r'[^\d,.\-()（）%/=＝─—═]', word):
+                parts.append(word)
+        if re.match(r'(\d+\.|[（(][\d一二三四五六七八九十]{1,2}[)）]|[一二三四五六七八九十]+、)', body):
+            break  # 「(一)單月  115年8月 …」這種段落標題行本身可能就是表頭，收完就停
+    return ' '.join(reversed(parts))
+
+def number_candidates(text):
+    """回傳 [(候選標籤, 數字字串, 所在行標示)]，排除日期、條號、項次編號這些不是金額的數字"""
+    out = []
+    for m in _NUM_RE.finditer(text):
+        tok = m.group()
+        before, after = text[m.start() - 1:m.start()], text[m.end():m.end() + 1]
+        if before == '/' or after.startswith(_NOT_VALUE_SUFFIX):
+            continue
+        if after == '.' and not tok.startswith(('(', '（')):
+            continue  # 「1.事實發生日」這種項次
+        if re.fullmatch(r'[（(]\d{1,2}[)）]', tok):
+            continue  # 「(1)營業收入」這種項次
+        ls = text.rfind('\n', 0, m.start()) + 1
+        le = text.find('\n', m.end())
+        le = len(text) if le == -1 else le
+        s, e = max(ls, m.start() - 80), min(le, m.end() + 80)
+        line = (text[s:m.start()] + f"【{tok}】" + text[m.end():e]).strip()
+        header = ''
+        if re.search(r'[ \t　]{3,}$', text[ls:m.start()]):  # 前面一大段空白 = 表格欄位
+            header = _column_header(text, ls, m.start(), m.end())
+            if header:
+                line += f"｜同一欄上方標題：{header}"
+        out.append((f"#{len(out) + 1} {tok}", tok, line, header))
+    return out
+
+def _pick(instructions, cands, none_desc):
+    criteria = {label: f"所在行：{line}" for label, _, line, _ in cands[:254]}
+    criteria[JEV_NONE] = none_desc
+    return {"type": "choice", "instructions": instructions, "criteria": criteria}
+
+def jev_questions(desc):
+    cands = number_candidates(desc)
+    amounts = [c for c in cands if not c[1].endswith('%')]
+    pcts = [c for c in cands if c[1].endswith('%')]
+    self_note = "只看公司本身（合併或母公司）的數字；子公司的數字、去年同期的金額、累計或最近四季的數字都不算。"
+    yoy_note = "只看公司本身（合併或母公司）；累計、單季或子公司的增減百分比都不算。"
+    questions = {
+        "earnings": JEV_QUESTION,
+        "m_eps": _pick(
+            "公告中，公司最近一個「單月」的每股盈餘（元）是哪一個候選數字？有稅後就選稅後。" + self_note, amounts,
+            "公告沒有單月每股盈餘，例如只有 1~N 月累計、單季、最近四季或稅前累計的每股盈餘；"
+            "表格裡「本月份／單月」那一欄是空白、每股盈餘只填在「累計」欄時，也算沒有。"),
+        "m_yoy": _pick(
+            "公告中，公司最近一個「單月」每股盈餘與去年同期相比的增減百分比是哪一個候選數字？" + yoy_note, pcts,
+            "公告沒有列出單月每股盈餘的年增減百分比。"),
+        "q_eps": _pick(
+            "公告中，公司最近一個「單季」（例如 115年第2季）的每股盈餘（元）是哪一個候選數字？" + self_note, amounts,
+            "公告沒有單季每股盈餘。"),
+        "m_rev": _pick(
+            "公告中，公司最近一個「單月」的營業收入金額是哪一個候選數字？" + self_note, amounts,
+            "公告沒有單月營業收入金額。"),
+        "r_yoy": _pick(
+            "公告中，公司最近一個「單月」營業收入與去年同期相比的增減百分比是哪一個候選數字？" + yoy_note, pcts,
+            "公告沒有列出單月營業收入的年增減百分比。"),
+        "rev_unit": {
+            "type": "choice",
+            "instructions": "公告中公司單月營業收入金額所用的單位是什麼？看表頭、欄位名稱或金額後面寫的單位。",
+            "criteria": {"元": "新台幣元", "仟元": "仟元／千元", "百萬元": "百萬元", "億元": "億元",
+                         JEV_NONE: "公告沒有單月營業收入金額，或看不出單位。"},
+        },
+    }
+    return questions, {label: (tok, header) for label, tok, _, header in cands}
+
+def _answer_num(ans, tokens, reject_cumulative=False):
+    choice = ans.get("choice")
+    if choice == JEV_NONE or choice not in tokens or ans.get("confidence", 0) < JEV_MIN_CONF:
         return None
+    tok, header = tokens[choice]
+    if reject_cumulative and re.search(r'累計|四季', header):
+        # 高雄銀：「本月份」欄空白、EPS 只填在「累計」欄，Jev 仍會高信心挑累計數字。欄位標題是
+        # 程式對齊算出來的，硬規則擋比再問 Jev 可靠（另問「有沒有單月EPS」實測反而誤殺浩宇、漢達）
+        return None
+    return _parse_num(tok.replace('%', ''))
+
+def jev_judge(ann):
+    """回傳 (是獲利公告的機率, 財務數字 dict)；沒 key 或呼叫失敗回 (None, None)，
+    呼叫端一律放行、財務數字退回 regex_financials，不能因為 Jev 掛掉漏訊號。"""
+    if not TYPESAFE_KEY:
+        return None, None
+    desc = ann.get("說明", "")[:JEV_DESC_LIMIT]
+    questions, tokens = jev_questions(desc)
     payload = {
         "model": "jev-latest",
         "state": {"announcement": {
             "company": ann.get("公司名稱", ""), "subject": ann.get("主旨", ""),
-            "clause": ann.get("符合條款", ""), "description": ann.get("說明", "")[:2000],
+            "clause": ann.get("符合條款", ""), "description": desc,
         }},
-        "questions": {"earnings": JEV_QUESTION},
+        "questions": questions,
     }
     for attempt in range(3):
         try:
             result = http_post_json("https://api.typesafe.ai/v1/systemone", payload,
-                                    headers={"Authorization": f"Bearer {TYPESAFE_KEY}"}, timeout=20)
-            return float(result["answers"]["earnings"]["noul"])
+                                    headers={"Authorization": f"Bearer {TYPESAFE_KEY}"}, timeout=30)
+            a = result["answers"]
+            break
         except urllib.error.HTTPError as e:
             if e.code not in (429, 529) or attempt == 2:
                 print(f"  Jev 失敗（HTTP {e.code}），直接放行")
-                return None
+                return None, None
             time.sleep(2 * (attempt + 1))
         except Exception as e:
             print(f"  Jev 失敗：{e}，直接放行")
-            return None
+            return None, None
+
+    m_rev = _answer_num(a["m_rev"], tokens)
+    scale = (REV_UNITS.get(a["rev_unit"].get("choice"))
+             if a["rev_unit"].get("confidence", 0) >= JEV_MIN_CONF else None)
+    fin = {
+        'm_eps': _answer_num(a["m_eps"], tokens, reject_cumulative=True),
+        'm_yoy': _answer_num(a["m_yoy"], tokens),
+        'q_eps': _answer_num(a["q_eps"], tokens, reject_cumulative=True),
+        'm_rev': round(m_rev * scale, 2) if (m_rev is not None and scale) else None,
+        'r_yoy': _answer_num(a["r_yoy"], tokens),
+        'source': 'jev',
+        'confidence': {k: round(a[k].get("confidence", 0), 2)
+                       for k in ("m_eps", "m_yoy", "q_eps", "m_rev", "r_yoy", "rev_unit")},
+    }
+    return float(a["earnings"]["noul"]), fin
 
 # ── 6. Telegram ───────────────────────────────────────────────────
 def send_telegram(text):
@@ -596,16 +743,19 @@ def scan():
     ]
     print(f"  符合條件：{len(matched)} 筆")
 
-    # Jev 再過濾一次：關鍵字命中但其實不是在公布獲利的公告（面額變更等）剔除
+    # Jev 再過濾一次：關鍵字命中但其實不是在公布獲利的公告（面額變更等）剔除；
+    # 同一個 request 順便挑出 EPS／營收數字，失敗的那筆 fin 留 None、之後退回 regex
+    fins = {}
     if matched and TYPESAFE_KEY:
-        print(f"Jev 判斷是否為獲利公告（門檻 {JEV_THRESHOLD}）...")
+        print(f"Jev 判斷是否為獲利公告（門檻 {JEV_THRESHOLD}）並抽取 EPS／營收...")
         kept = []
         for a in matched:
-            p = jev_earnings_prob(a)
+            p, fin = jev_judge(a)
             if p is not None and p < JEV_THRESHOLD:
                 print(f"  ✂ {p:.2f} {a['公司代號']} {a['主旨'][:40]}")
                 continue
             kept.append(a)
+            fins[id(a)] = fin
         print(f"  Jev 過濾後：{len(kept)} 筆（剔除 {len(matched) - len(kept)} 筆）")
         matched = kept
 
@@ -626,8 +776,12 @@ def scan():
         volume_lots = round(volume / 1000) if volume is not None else None
         print(f"\n處理 {code} {ann['公司名稱']}（股價 {price}，成交量 {volume_lots}張）")
 
-        pe = calc_pe(ann['說明'], price)
+        fin = fins.get(id(ann)) or regex_financials(ann['說明'])
+        pe = calc_pe(fin, price)
         dashboard = _get_dashboard_row(code)
+        print(f"  抽取（{fin['source']}）：單月EPS {fin['m_eps']}｜年增 {fin['m_yoy']}%｜單季EPS {fin['q_eps']}"
+              f"｜單月營收 {fin['m_rev']}百萬｜年增 {fin['r_yoy']}%"
+              + (f"｜信心 {fin['confidence']}" if fin.get('confidence') else ''))
         print(f"  預估本益比：{pe['pre_pe_note']}")
 
         print("  AI 分析中...")
