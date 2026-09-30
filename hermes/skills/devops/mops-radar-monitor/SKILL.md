@@ -16,6 +16,7 @@ description: 管理與優化 MOPS 重大公告監控與通知系統的相關流�
 
 📢【公司名稱｜公司代號】
 📅 YYYY-MM-DD HH:MM:SS
+📑 第51款
 💰 收盤價: X | 成交量: Y
 
 <b>關鍵數據：</b>
@@ -34,5 +35,5 @@ description: 管理與優化 MOPS 重大公告監控與通知系統的相關流�
 ## 維運與部署
 - 若遇到系統異常（如資料來源端點變更導致抓取失敗），務必先檢查 `~/.hermes/scripts/` 下的腳本，因為 cron 任務直接調用這些檔案。
 - 修改腳本後，確保對應的 git repo（如 `~/mops_radar`）已 commit 並 push，保持同步。
-- **重要環境變數**：若系統涉及 API 呼叫（如 OpenRouter 或 Supabase），請確認 `~/.hermes/.env` 是否已載入，避免 ConnectionRefusedError。
+- **重要環境變數**：若系統涉及 API 呼叫（如 OpenRouter 或 Supabase），金鑰放在 `~/mops_radar/.env`（mops_radar.py／fetch_prices.py 啟動時自己載入，不讀 `~/.hermes/.env`），缺值會在 import 時直接 KeyError。
 - **Git 整合**：所有排程腳本均需納入 git 版本控制，確保 Hermes 跑的版本是最新且經測試的。

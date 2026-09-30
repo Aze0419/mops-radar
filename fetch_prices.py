@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""抓最新收盤價：每日 14:15 執行，抓 TWSE+TPEX 存成 prices.json 並回寫 Supabase stock_prices"""
+"""抓最新收盤價：TWSE+TPEX 回寫 Supabase stock_prices 並存一份 prices.json。
+14:15 跑 --tse-only 只抓上市，上櫃較晚發布，交給 15:45／18:00 補跑與 16~23 點的持續重試 job"""
 import json, os, re, sys, time, urllib.error, urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -153,7 +154,8 @@ def fetch_otc_history(d):
 
 def backfill_otc(start_str, end_str):
     """補歷史缺口用：逐個交易日（週一~五）呼叫 fetch_otc_history 並回寫 Supabase。
-    只補上櫃——上市 fetch_tse_openapi(STOCK_DAY_ALL) 本來就有 date 參數，缺口直接用平常流程補即可。
+    只補上櫃——上市主力 fetch_tse（MI_INDEX）本來就吃 date 參數，缺口改 smart_date 的日期跑平常流程即可
+    （備援 fetch_tse_openapi 的 STOCK_DAY_ALL 沒有 date 參數，只回最新一天）。
     """
     start = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=TZ)
     end = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=TZ)

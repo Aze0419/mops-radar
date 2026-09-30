@@ -154,15 +154,15 @@
   <div class="container">
 
     <div class="header">
-      <p class="header-eyebrow">Architecture · mops-radar · 2026-09-20</p>
+      <p class="header-eyebrow">Architecture · mops-radar · 2026-09-30</p>
       <h1>MOPS 飆股雷達系統架構</h1>
-      <p class="subtitle">每日收盤價寫進 Supabase，凌晨掃 MOPS 重大訊息公告配合股價算本益比、AI 分析，早上推播 Telegram 與 Google Sheet。同一支 repo 裡兩支腳本的實際執行位置不一樣，是這個系統最容易踩的坑。</p>
+      <p class="subtitle">每日收盤價寫進 Supabase，凌晨掃 MOPS 重大訊息公告配合股價算本益比、AI 分析，早上推播 Telegram 與 Google Sheet。兩支腳本都在 Hermes 上的本機 git clone 執行，部署就是 commit、push 再 git pull；Google Drive 那份已退役。</p>
     </div>
 
     <div class="diagram-container">
       <svg viewBox="0 0 1000 880" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="mops-radar-arch-title mops-radar-arch-desc">
         <title id="mops-radar-arch-title">MOPS 飆股雷達系統架構</title>
-        <desc id="mops-radar-arch-desc">TWSE/TPEx 收盤價經 fetch_prices.py 寫入 Supabase stock_prices，MOPS 公告經 scan 階段讀取股價算本益比並由 AI 分析後存進 pending_results.json，send 階段讀取快取推播 Telegram 與寫入 Google Sheet，全程由 Hermes 排程執行。</desc>
+        <desc id="mops-radar-arch-desc">TWSE/TPEx 收盤價經 fetch_prices.py 寫入 Supabase stock_prices，MOPS 公告經 scan 階段讀取股價算本益比並由 AI 分析後存進 pending_results.json，send 階段讀取快取推播 Telegram 與寫入 Google Sheet；scan 用 TypeSafe Jev 剔除非獲利公告並挑出 EPS／營收，全程由 Hermes 排程執行。</desc>
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
             <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
@@ -271,7 +271,7 @@
         <rect x="688" y="326" width="36" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
         <text x="706" y="335" fill="#2d3142" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">CRON</text>
         <text x="780" y="354" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">mops_radar.py scan</text>
-        <text x="780" y="370" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">runner.py wrap · 00:30</text>
+        <text x="780" y="370" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">00:30 · Jev 篩選／抽 EPS</text>
         <text x="780" y="386" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">OpenRouter AI 分析</text>
 
         <!-- pending_results.json (store) -->
@@ -307,7 +307,7 @@
         <text x="780" y="746" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">gspread · service account</text>
 
         <!-- ============================= ANNOTATION CALLOUTS ============================= -->
-        <text x="940" y="180" fill="#2d3142" font-size="14" font-style="italic" font-family="'Instrument Serif','Noto Serif TC',serif" text-anchor="end">scan 還在 Google Drive 上跑</text>
+        <text x="940" y="180" fill="#2d3142" font-size="14" font-style="italic" font-family="'Instrument Serif','Noto Serif TC',serif" text-anchor="end">Jev 挑 EPS，AI 只寫分析</text>
         <path d="M 900 188 Q 916 250 868 320" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
         <circle cx="864" cy="326" r="2" fill="#2d3142"/>
 
@@ -338,12 +338,12 @@
       <div class="card">
         <div class="card-header">
           <span class="card-dot ink"></span>
-          <h3>兩支腳本、兩個執行位置</h3>
+          <h3>執行位置與部署</h3>
         </div>
         <ul>
-          <li>fetch_prices.py：2026-09-07 起改跑本機 git clone</li>
-          <li>mops_radar.py（scan/send）：仍在 Google Drive，靠 runner 包一層避開掛載卡住</li>
-          <li>改 Google Drive 那份程式碼要記得同步回本機 clone</li>
+          <li>兩支腳本都跑 Hermes 上的 ~/mops_radar（本機 git clone）</li>
+          <li>部署 = commit + push，再到 Hermes git pull</li>
+          <li>Google Drive 那份 2026-09-28 退役，不要再改、不要再指回去</li>
         </ul>
       </div>
 
@@ -353,9 +353,9 @@
           <h3>scan / send 交接</h3>
         </div>
         <ul>
-          <li>scan（00:30）只分析存檔，不送出</li>
-          <li>send（07:00）讀 cache 送 Telegram，送完才刪</li>
-          <li>cache 還在 = send 失敗，資料沒丟，可補送</li>
+          <li>scan（00:30）只分析存檔，不送出；失敗也會寫進 cache</li>
+          <li>send（07:00）每筆記 Sheet／Telegram 進度，重跑只補沒做完的</li>
+          <li>沒送完的 item 隔天 scan 會帶著走，不會被蓋掉</li>
         </ul>
       </div>
 
@@ -365,16 +365,16 @@
           <h3>防呆設計</h3>
         </div>
         <ul>
-          <li>runner.py：timeout + 最多 4 次重試（15/30/60s 退避）</li>
-          <li>股價一律查 Supabase，不讓 AI 自己編</li>
-          <li>Telegram HTML 標籤沒配對就降級純文字，避免整則被拒收</li>
+          <li>OpenRouter 暫時性錯誤重試 3 次，連續 2 筆掛掉就熔斷</li>
+          <li>股價查 Supabase、EPS 由 Jev 挑，都不讓 AI 自己編</li>
+          <li>Telegram 內容全部跳脫，只放回成對的 &lt;b&gt;，解析失敗改送純文字</li>
         </ul>
       </div>
     </div>
 
     <div class="footer">
       <span>mops-radar · github.com/Aze0419/mops-radar</span>
-      <span>2026-09-20</span>
+      <span>2026-09-30</span>
     </div>
 
   </div>
