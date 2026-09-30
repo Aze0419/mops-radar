@@ -115,6 +115,9 @@ def _scan_five(m, monkeypatch, analyze):
     monkeypatch.setattr(m, "fetch_announcements", lambda *a: anns)
     monkeypatch.setattr(m, "fetch_prices", lambda codes: {})
     monkeypatch.setattr(m, "_get_dashboard_row", lambda c: None)
+    # 有年增率，才不會被 enforce_growth_data 降級（這裡測的是熔斷與正規化）
+    monkeypatch.setattr(m, "regex_financials", lambda d: {"m_eps": 1.0, "m_yoy": 10.0, "q_eps": None, "m_rev": 100.0,
+                                                          "r_yoy": 5.0, "c_eps": None, "c_months": None, "source": "regex"})
     monkeypatch.setattr(m, "analyze", analyze)
     m.scan()
     return m._load_cache()["items"]
@@ -164,3 +167,24 @@ def test_title_notes_backup_model_only_when_used(m, monkeypatch):
     m._save_cache({"empty": None, "items": [it("1", P)]})
     m.send_results()
     assert "備援" not in sent[0]
+
+
+@pytest.mark.parametrize("rating, eps_yoy, rev_yoy, want", [
+    ("🔴 強烈買進", None, None, "🟡 一般觀望"),   # 彰銀、豐泰：只有今年累計 EPS
+    ("🔴 強烈買進", None, 12.0, "🟠 建議買進"),   # 有營收成長可以留在建議買進
+    ("🔴 強烈買進", None, -3.0, "🟡 一般觀望"),
+    ("🟠 建議買進", None, None, "🟡 一般觀望"),   # 華南金、遠東銀
+    ("🟠 建議買進", None, 8.0, "🟠 建議買進"),    # 營收有成長，建議買進成立
+    ("🔴 強烈買進", 285.0, 33.0, "🔴 強烈買進"),  # 資料齊全不動
+    ("🔴 強烈買進", -20.0, 5.0, "🔴 強烈買進"),   # 年增率有值但 AI 判斷不同（例如轉虧為盈）不在這裡改
+    ("🟡 一般觀望", None, None, "🟡 一般觀望"),
+    ("🟢 需要小心", None, None, "🟢 需要小心"),
+])
+def test_enforce_growth_data(m, rating, eps_yoy, rev_yoy, want):
+    ai = {"ai_rating": rating, "display_text": "<b>分析</b>"}
+    note = m.enforce_growth_data(ai, {"pre_monthly_eps_yoy": eps_yoy, "pre_monthly_revenue_yoy": rev_yoy})
+    assert ai["ai_rating"] == want
+    if want == rating:
+        assert note is None and ai["display_text"] == "<b>分析</b>"
+    else:
+        assert rating in note and want in note and ai["display_text"].endswith(note)

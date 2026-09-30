@@ -221,13 +221,20 @@ def regex_financials(detail):
         r_yoy = rp[0] if rp else None
 
     return {'m_eps': m_eps, 'm_yoy': m_yoy, 'q_eps': q_eps, 'm_rev': m_rev, 'r_yoy': r_yoy,
-            'source': 'regex'}
+            'c_eps': None, 'c_months': None, 'source': 'regex'}
 
 def calc_pe(fin, price):
+    """預估全年 EPS 優先順序：單月×12 → 單季×4 → 今年 1~N 月累計×12/N（跟 SYSTEM_PROMPT 給 AI 的順序一致）"""
     m_eps, q_eps = fin['m_eps'], fin['q_eps']
-    eps, mult, src = m_eps, 12, '月'
-    if eps is None:
-        eps, mult, src = q_eps, 4, '季'
+    c_eps, c_months = fin.get('c_eps'), fin.get('c_months')
+    if m_eps is not None:
+        eps, mult, src, basis = m_eps, 12, '月', '單月EPS × 12'
+    elif q_eps is not None:
+        eps, mult, src, basis = q_eps, 4, '季', '單季EPS × 4'
+    elif c_eps is not None and c_months:
+        eps, mult, src, basis = c_eps, 12 / c_months, '累計', f'1~{c_months}月累計EPS {c_eps} × 12/{c_months}'
+    else:
+        eps, mult, src, basis = None, None, None, '無'
     annual = round(eps * mult, 2) if eps is not None else None
     pe = round(price / annual, 2) if (annual is not None and annual > 0 and price > 0) else None
     pe_note = (f"{price} ÷ {annual} = {pe}倍" if pe else
@@ -241,6 +248,9 @@ def calc_pe(fin, price):
         'pre_monthly_revenue_yoy': fin['r_yoy'],
         'pre_extract_source':      fin['source'],
         'pre_eps_source':          src,
+        'pre_eps_basis':           basis,
+        'pre_ytd_eps':             c_eps,
+        'pre_ytd_months':          c_months,
         'pre_annual_eps':          annual,
         'pre_pe':                  pe,
         'pre_pe_note':             pe_note,
@@ -387,13 +397,19 @@ def analyze(ann, price, pe, dashboard=None):
         + "近4季ROE：" + str(dv('近4季ROE%')) + "%" + NL
         + "去年同期EPS：" + str(dv('去年同期EPS')) + "元" + NL
     ) if dashboard else ''
+    pct = lambda x: f"{x}%" if x is not None else "無資料"
+    # 金融股月自結多半只給今年累計、沒有去年同期比較。年增率空著不講清楚，AI 會自己腦補「獲利成長」
+    # 走路徑 A 給強烈買進（2026-09-30 華南金實測），所以明講依評級標準不能當作有成長
+    no_growth = (NL + "注意：公告沒有 EPS 年增率，依評級標準不能視為「EPS 有成長」，也不要自行推估成長率。"
+                 if pe['pre_monthly_eps_yoy'] is None else '')
     user_msg = (
         f"請分析：\n股票：{ann['公司名稱']}（{ann['公司代號']}）\n股價：{price}元\n\n"
         f"【系統預算値】\n"
-        f"單月EPS：{v(pe['pre_monthly_eps'])}元｜年增率：{v(pe['pre_monthly_eps_yoy'])}%\n"
-        f"單月營收：{v(pe['pre_monthly_revenue'])}百萬｜年增率：{v(pe['pre_monthly_revenue_yoy'])}%\n"
-        f"預估全年EPS：{v(pe['pre_annual_eps'])}元\n"
+        f"單月EPS：{v(pe['pre_monthly_eps'])}元｜年增率：{pct(pe['pre_monthly_eps_yoy'])}\n"
+        f"單月營收：{v(pe['pre_monthly_revenue'])}百萬｜年增率：{pct(pe['pre_monthly_revenue_yoy'])}\n"
+        f"預估全年EPS：{v(pe['pre_annual_eps'])}元（推估方式：{pe.get('pre_eps_basis', '無')}）\n"
         f"預估本益比：{pe['pre_pe_note']}"
+        + no_growth
         + dash_block
         + f"\n公告內容：\n{ann['說明'][:3000]}"
         + "\n\n（收盤價與成交量已顯示在訊息開頭，display_text 不需要再重複列出這兩項）"
@@ -421,6 +437,27 @@ def normalize_rating(ai):
             if r[2:] in text:
                 return r
     return "🟡 一般觀望"
+
+def enforce_growth_data(ai, pe):
+    """評級標準裡 🔴 兩條路都要 EPS 年增率（路徑 A 要大於 0%、路徑 B 要大於 30% 或跟營收比），
+    🟠 要 EPS 或營收年增率大於 0%。缺資料時 AI 會自己腦補成長給高評級（2026-09-30 實測：彰銀、豐泰
+    只有今年累計 EPS、沒有去年比較，prompt 明講不能當成長還是給 🔴），所以在程式裡照規則降級。
+    只處理「資料缺」的情況；年增率有值但 AI 判斷跟規則不同（例如轉虧為盈）不在這裡改。
+    回傳調整說明（沒調整回 None）"""
+    eps_yoy, rev_yoy = pe.get('pre_monthly_eps_yoy'), pe.get('pre_monthly_revenue_yoy')
+    rating = ai.get("ai_rating")
+    rev_up = rev_yoy is not None and rev_yoy > 0
+    if rating == "🔴 強烈買進" and eps_yoy is None:
+        new = "🟠 建議買進" if rev_up else "🟡 一般觀望"
+        why = "公告沒有 EPS 年增率，不符合強烈買進要求的 EPS 成長條件"
+    elif rating == "🟠 建議買進" and eps_yoy is None and rev_yoy is None:
+        new, why = "🟡 一般觀望", "公告沒有 EPS 與營收年增率，無法確認建議買進要求的正成長"
+    else:
+        return None
+    ai["ai_rating"] = new
+    note = f"（系統依評級標準調整：AI 原評 {rating} → {new}，{why}）"
+    ai["display_text"] = (ai.get("display_text") or "") + "\n" + note
+    return note
 
 class AIUnavailable(Exception):
     """重試用完仍失敗（逾時、連線、429、5xx），scan 用來判斷要不要熔斷"""
@@ -494,8 +531,9 @@ _NUM_RE = re.compile(r'[（(]?-?\d[\d,]*(?:\.\d+)?[)）]?%?')
 _NOT_VALUE_SUFFIX = tuple('年月日季條款項點/')
 JEV_NONE = "無"
 REV_UNITS = {"元": 1e-6, "仟元": 1e-3, "百萬元": 1, "億元": 100}  # 換算成百萬
-# 2026-09-30 用 5 天 31 則實測：挑對的非空答案信心都 ≥ 0.93，挑錯的（單季 EPS 誤拿單月數字）
-# 在 0.57~0.70；低於門檻當作沒資料，寧可缺 EPS 也不要錯的 EPS 算出假本益比
+# 「同一個數值」加總後的機率門檻（見 _answer_num），低於門檻當作沒資料，寧可缺 EPS 也不要錯的 EPS 算出假本益比。
+# 2026-09-30 用 tests/fixtures 22 則實測定的：挑對的都遠高於 0.8，挑錯的（夏都、中華電單季 EPS 誤拿單月數字）
+# 在 0.57~0.70。改門檻前先跑 tests/jev_live_check.py
 JEV_MIN_CONF = float(os.environ.get("JEV_MIN_CONF", "0.8"))
 
 _BLANKS = ' \t　'
@@ -590,19 +628,53 @@ def jev_questions(desc):
             "criteria": {"元": "新台幣元", "仟元": "仟元／千元", "百萬元": "百萬元", "億元": "億元",
                          JEV_NONE: "公告沒有單月營業收入金額，或看不出單位。"},
         },
+        # 金融股、豐泰這類自結公告常常只給「1~N 月累計」EPS，沒有單月／單季，只能用累計年化
+        "c_eps": _pick(
+            "公告中，公司本身（合併或母公司）「今年 1 月到最近一個月」累計的稅後每股盈餘（元）是哪一個候選數字？"
+            "欄位或內文寫「累計」「本年累計」「當年度累計」「1~N月累計」都算（月自結公告的累計就是從今年 1 月起算）。"
+            "有稅後就選稅後，沒有稅後才選稅前。子公司、去年同期、單月、單季、「最近四季累計」的數字都不算。", amounts,
+            "公告完全沒有累計的每股盈餘，或只有「最近四季累計」的每股盈餘。"),
+        "c_months": {
+            "type": "choice",
+            # 同一個 request 的題目互相看不到答案，不能寫「上一題」，要自己把對象講清楚
+            "instructions": "公告中公司本身「今年度累計」（從今年 1 月開始累計）的每股盈餘，是累計到幾月？"
+                            "看主旨（例如「115年8月份自結盈餘」）或欄位名稱（例如「115/01~08月累計」）。"
+                            "「最近四季累計」不是今年度累計。",
+            "criteria": {**{str(n): f"累計 1 月到 {n} 月，共 {n} 個月" for n in range(1, 13)},
+                         JEV_NONE: "公告沒有今年度累計的每股盈餘，或看不出累計到幾月。"},
+        },
     }
     return questions, {label: (tok, header) for label, tok, _, header in cands}
 
-def _answer_num(ans, tokens, reject_cumulative=False):
-    choice = ans.get("choice")
-    if choice == JEV_NONE or choice not in tokens or ans.get("confidence", 0) < JEV_MIN_CONF:
+NOT_PERIOD_EPS = r'累計|四季'  # 單月／單季 EPS 挑到這種欄位就擋
+NOT_YTD_EPS = r'四季'          # 年初至今累計 EPS 挑到「最近四季累計」欄就擋（那是滾動一年，不是 1~N 月）
+
+def _answer_num(ans, tokens, reject_header=None):
+    """同一個數字常在內文、表格、附註各出現一次（華南金 1.71 出現 3 次，機率 0.54／0.42／0.03 分散，
+    confidence 只有 0.52）。所以先把「同一個數值」的候選機率加總再判斷，不看單一候選的 confidence。
+    欄位標題被擋的候選（高雄銀：EPS 只填在「累計」欄，Jev 仍會高機率挑它）不算進任何數值。
+    舊格式回應沒有 probabilities 時，退回用 choice + confidence。"""
+    probs = ans.get("probabilities")
+    if not probs:
+        choice = ans.get("choice")
+        if choice == JEV_NONE or choice not in tokens or ans.get("confidence", 0) < JEV_MIN_CONF:
+            return None
+        probs = {choice: 1.0}
+    by_value = {}
+    for label, p in probs.items():
+        if label not in tokens:
+            continue  # 「無」
+        tok, header = tokens[label]
+        if reject_header and re.search(reject_header, header):
+            # 欄位標題是程式對齊算出來的，硬規則擋比再問 Jev 可靠（另問「有沒有單月EPS」實測反而誤殺浩宇、漢達）
+            continue
+        v = _parse_num(tok.replace('%', ''))
+        if v is not None:
+            by_value[v] = by_value.get(v, 0) + p
+    if not by_value:
         return None
-    tok, header = tokens[choice]
-    if reject_cumulative and re.search(r'累計|四季', header):
-        # 高雄銀：「本月份」欄空白、EPS 只填在「累計」欄，Jev 仍會高信心挑累計數字。欄位標題是
-        # 程式對齊算出來的，硬規則擋比再問 Jev 可靠（另問「有沒有單月EPS」實測反而誤殺浩宇、漢達）
-        return None
-    return _parse_num(tok.replace('%', ''))
+    value, p = max(by_value.items(), key=lambda kv: kv[1])
+    return value if p >= JEV_MIN_CONF else None
 
 def jev_judge(ann):
     """回傳 (是獲利公告的機率, 財務數字 dict)；沒 key 或呼叫失敗回 (None, None)，
@@ -638,14 +710,17 @@ def jev_judge(ann):
     scale = (REV_UNITS.get(a["rev_unit"].get("choice"))
              if a["rev_unit"].get("confidence", 0) >= JEV_MIN_CONF else None)
     fin = {
-        'm_eps': _answer_num(a["m_eps"], tokens, reject_cumulative=True),
+        'm_eps': _answer_num(a["m_eps"], tokens, reject_header=NOT_PERIOD_EPS),
         'm_yoy': _answer_num(a["m_yoy"], tokens),
-        'q_eps': _answer_num(a["q_eps"], tokens, reject_cumulative=True),
+        'q_eps': _answer_num(a["q_eps"], tokens, reject_header=NOT_PERIOD_EPS),
         'm_rev': round(m_rev * scale, 2) if (m_rev is not None and scale) else None,
         'r_yoy': _answer_num(a["r_yoy"], tokens),
+        'c_eps': _answer_num(a["c_eps"], tokens, reject_header=NOT_YTD_EPS),
+        'c_months': (int(a["c_months"]["choice"]) if a["c_months"].get("choice", JEV_NONE).isdigit()
+                     and a["c_months"].get("confidence", 0) >= JEV_MIN_CONF else None),
         'source': 'jev',
         'confidence': {k: round(a[k].get("confidence", 0), 2)
-                       for k in ("m_eps", "m_yoy", "q_eps", "m_rev", "r_yoy", "rev_unit")},
+                       for k in ("m_eps", "m_yoy", "q_eps", "m_rev", "r_yoy", "rev_unit", "c_eps", "c_months")},
     }
     return float(a["earnings"]["noul"]), fin
 
@@ -909,8 +984,9 @@ def _scan(carry):
         dashboard = _get_dashboard_row(code)
         print(f"  抽取（{fin['source']}）：單月EPS {fin['m_eps']}｜年增 {fin['m_yoy']}%｜單季EPS {fin['q_eps']}"
               f"｜單月營收 {fin['m_rev']}百萬｜年增 {fin['r_yoy']}%"
+              f"｜累計EPS {fin.get('c_eps')}（1~{fin.get('c_months')}月）"
               + (f"｜信心 {fin['confidence']}" if fin.get('confidence') else ''))
-        print(f"  預估本益比：{pe['pre_pe_note']}")
+        print(f"  預估本益比：{pe['pre_pe_note']}（{pe['pre_eps_basis']}）")
 
         if ai_down_streak >= 2:
             # OpenRouter 整個掛掉時，每筆都重試到底會拖過 Hermes 執行上限、整個 scan 被砍、連 cache 都沒寫
@@ -928,6 +1004,9 @@ def _scan(carry):
                 if ai.get("ai_rating") != rating:
                     print(f"  評級字串不標準「{ai.get('ai_rating')}」→ 視為 {rating}")
                     ai["ai_rating"] = rating
+                note = enforce_growth_data(ai, pe)
+                if note:
+                    print(f"  {note}")
             except Exception as e:
                 if isinstance(e, AIUnavailable):
                     ai_down_streak += 1
