@@ -24,7 +24,11 @@ RADAR_SHEET_ID   = os.environ.get("RADAR_SHEET_ID", "1UulUtCjGbBUk_36xCK7TuRSrEv
 RADAR_SHEET_NAME = "公告紀錄"
 SA_KEY_FILE      = os.environ.get("SA_KEY_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "google-sa.json"))
 TZ               = ZoneInfo("Asia/Taipei")
-AI_MODEL         = "google/gemini-3.1-flash-lite-preview"
+# 依優先順序；主模型是 preview 版，隨時可能下架。都用 Gemini 家族，繁中文風與 JSON 格式才一致
+AI_MODELS        = [m.strip() for m in os.environ.get(
+    "AI_MODELS", "google/gemini-3.1-flash-lite-preview,google/gemini-2.5-flash-lite,google/gemini-2.5-flash"
+).split(",") if m.strip()]
+AI_MODEL         = AI_MODELS[0]
 EXCLUDE_CODES    = {"6949", "5904"}  # 沛爾生醫、寶雅：公告期間每天重發面額變更公告，使用者要求排除
 TYPESAFE_KEY     = os.environ.get("TYPESAFE_API_KEY", "")
 # 2026-09-29 用 10 個交易日實測：面額變更／更正歷年財報都 ≤ 0.06，真正的財務業務公告都 ≥ 0.42，
@@ -394,12 +398,14 @@ def analyze(ann, price, pe, dashboard=None):
         + f"\n公告內容：\n{ann['說明'][:3000]}"
         + "\n\n（收盤價與成交量已顯示在訊息開頭，display_text 不需要再重複列出這兩項）"
     )
-    raw = openrouter_chat([
+    raw, model_used = openrouter_chat([
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": user_msg}
     ])
     start = raw.find('{'); end = raw.rfind('}') + 1
-    return json.loads(raw[start:end]) if start >= 0 else {"display_text": raw, "ai_rating": "🟡 一般觀望"}
+    ai = json.loads(raw[start:end]) if start >= 0 else {"display_text": raw, "ai_rating": "🟡 一般觀望"}
+    ai["model_used"] = model_used
+    return ai
 
 RATINGS = ("🔴 強烈買進", "🟠 建議買進", "🟡 一般觀望", "🟢 需要小心")
 
@@ -420,25 +426,40 @@ class AIUnavailable(Exception):
     """重試用完仍失敗（逾時、連線、429、5xx），scan 用來判斷要不要熔斷"""
 
 _RETRYABLE_HTTP = {408, 429, 500, 502, 503, 504, 529}
+# 模型 ID 被下架或沒有供應商時的錯誤字樣。2026-09-30 實測：models 陣列裡只要有一個 ID 無效，
+# OpenRouter 直接整個 request 回 400「is not a valid model ID」，不會自己往下一個備援跳
+_MODEL_GONE = re.compile(r'not a valid model ID|No endpoints found|is not available|model.{0,40}(deprecated|not found)', re.I)
+_dead_models = set()  # 這次執行裡已確認失效的模型，後面的公告不用再撞一次
 
 def openrouter_chat(messages, attempts=3):
-    """只重試「重試有機會好」的錯誤；400 這種請求本身有問題的直接拋出，並把 OpenRouter 回的
+    """回傳 (內容, 實際用到的模型)。models 陣列交給 OpenRouter 處理下游掛掉、限流這類暫時性錯誤；
+    模型 ID 失效它不會跳，由這裡剔除後立刻用剩下的重打（不算重試次數）。
+    其他只重試「重試有機會好」的錯誤；400 這種請求本身有問題的直接拋出，並把 OpenRouter 回的
     錯誤內容帶進訊息（2026-08 那三次 400 只留下 Bad Request，看不出原因）"""
-    last = None
-    for attempt in range(attempts):
+    last, attempt = None, 0
+    while attempt < attempts:
+        live = [m for m in AI_MODELS if m not in _dead_models]
+        if not live:
+            raise RuntimeError(f"AI_MODELS 全部失效：{', '.join(AI_MODELS)}，請更新模型清單")
         try:
             result = http_post_json(
                 "https://openrouter.ai/api/v1/chat/completions",
-                {"model": AI_MODEL, "messages": messages},
+                {"models": live, "messages": messages},
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
                 timeout=60,  # flash-lite 平常幾秒就回，每筆最多 3 次，要留在 Hermes 單次執行上限內
             )
             if not result.get("choices"):
                 # OpenRouter 上游模型出錯時可能回 200 + {"error": ...}
                 raise AIUnavailable(f"OpenRouter 沒回 choices：{str(result.get('error', result))[:300]}")
-            return result["choices"][0]["message"]["content"]
+            return result["choices"][0]["message"]["content"], result.get("model") or live[0]
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:300]
+            if e.code in (400, 404) and _MODEL_GONE.search(body):
+                gone = next((m for m in live if m in body), live[0])
+                _dead_models.add(gone)
+                rest = [m for m in live if m != gone]
+                print(f"  ⚠️ 模型 {gone} 已失效（{body[:150]}），改用 {rest[0] if rest else '（沒有備援了）'}")
+                continue
             if e.code not in _RETRYABLE_HTTP:
                 raise RuntimeError(f"OpenRouter HTTP {e.code}：{body}") from e
             last = AIUnavailable(f"OpenRouter HTTP {e.code}：{body}")
@@ -446,9 +467,10 @@ def openrouter_chat(messages, attempts=3):
             last = e
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             last = AIUnavailable(f"OpenRouter 連線失敗：{e}")
-        if attempt < attempts - 1:
-            wait = 5 * 3 ** attempt  # 5 秒、15 秒
-            print(f"  {last}，{wait} 秒後重試（{attempt + 2}/{attempts}）")
+        attempt += 1
+        if attempt < attempts:
+            wait = 5 * 3 ** (attempt - 1)  # 5 秒、15 秒
+            print(f"  {last}，{wait} 秒後重試（{attempt + 1}/{attempts}）")
             time.sleep(wait)
     raise last
 
@@ -900,6 +922,8 @@ def _scan(carry):
             try:
                 ai = analyze(ann, price, pe, dashboard)
                 ai_down_streak = 0
+                if ai.get("model_used") != AI_MODEL:
+                    print(f"  由備援模型 {ai.get('model_used')} 分析")
                 rating = normalize_rating(ai)
                 if ai.get("ai_rating") != rating:
                     print(f"  評級字串不標準「{ai.get('ai_rating')}」→ 視為 {rating}")
@@ -997,6 +1021,11 @@ def _send_items(cache):
     carried = sum(1 for i in pending if i.get("carried"))
     title = (f"📊 今日符合條件公告（{len(pending)} 筆"
              + (f"，含前次沒送出的 {carried} 筆" if carried else "") + "）")
+    backup = [i["ai"]["model_used"] for i in pending if i["ai"].get("model_used") not in (None, AI_MODEL)]
+    if backup:
+        # 主模型連續被跳過多半是下架了，要讓人看到才會去改 AI_MODELS
+        title += (f"\nℹ️ 其中 {len(backup)} 筆由備援模型 {html_escape(', '.join(sorted(set(backup))))} 分析"
+                  f"（主模型 {html_escape(AI_MODEL)} 暫時或永久無法使用，詳見 scan log）")
     for n, batch in enumerate(batches, 1):
         prefix = title + (f"（{n}/{len(batches)}）" if len(batches) > 1 else "") + "\n\n"
         send_telegram(prefix + SEP.join(b for _, b in batch))
