@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """MOPS 飆股雷達：每日監控重大公告 + AI分析 → Telegram + Google Sheet"""
 import re, json, sys, time, traceback, unicodedata, urllib.request, urllib.parse, urllib.error
+import html
 from html import escape as html_escape
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -89,7 +90,7 @@ def _get_dashboard_row(code):
 def fetch_announcements(roc_year, month, day):
     for attempt in range(3):
         try:
-            html = http_post(
+            page = http_post(
                 "https://mopsov.twse.com.tw/mops/web/ajax_t05st02",
                 {"firstin": "true", "off": "1", "step": "1", "step00": "0",
                  "TYPEK": "all", "year": roc_year, "month": month, "day": day},
@@ -102,17 +103,17 @@ def fetch_announcements(roc_year, month, day):
             print(f"  MOPS 連線失敗（{e}），{10 * (attempt + 1)} 秒後重試")
             time.sleep(10 * (attempt + 1))
     # 當天沒資料實際回的是「查無115/12/25之重大訊息資料」（2026-09-30 實測），不是「查無需求資料」
-    if re.search(r'查無.{0,20}資料', html):
+    if re.search(r'查無.{0,20}資料', page):
         return []
-    out = parse_announcement_list(html)
+    out = parse_announcement_list(page)
     if not out:
         # 被擋、改版或錯誤頁都會落到這裡，不能當成「今天沒有公告」送出去
-        raise RuntimeError(f"MOPS 回應既沒有公告也不是「查無資料」，可能被擋或改版：{strip_tags(html)[:200]}")
+        raise RuntimeError(f"MOPS 回應既沒有公告也不是「查無資料」，可能被擋或改版：{strip_tags(page)[:200]}")
     return out
 
-def parse_announcement_list(html):
+def parse_announcement_list(page):
     out = []
-    forms = re.findall(r'<form\b[^>]*>[\s\S]*?</form>', html, re.I)
+    forms = re.findall(r'<form\b[^>]*>[\s\S]*?</form>', page, re.I)
     for form in forms:
         h = {}
         for m in re.finditer(r'<input[^>]*name=["\']h(\d+)["\'][^>]*value=["\']([^"\']*)["\']', form, re.I):
@@ -636,10 +637,21 @@ def send_telegram(text):
             cut = text.rfind('\n', 0, 4000)
             cut = cut if cut != -1 else 4000  # 找不到換行才硬切
             chunk, text = text[:cut], text[cut+1:]
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"}
-        req = urllib.request.Request(url, data=json.dumps(payload).encode(),
-                                     headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
+        try:
+            _telegram_post(url, {"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"})
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            if e.code != 400 or "parse" not in body.lower():
+                raise
+            # 最後一道保險：HTML 還是解析失敗（例如上面逐字切段切斷了 <b>），改送純文字，至少訊號送得到
+            print(f"  Telegram HTML 解析失敗，改送純文字：{body[:200]}")
+            plain = html.unescape(re.sub(r'</?b>', '', chunk))
+            _telegram_post(url, {"chat_id": TELEGRAM_CHAT_ID, "text": plain})
+
+def _telegram_post(url, payload):
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10)
 
 # ── 7. Google Sheet 同步 ─────────────────────────────────────────
 RADAR_HEADERS = [
@@ -904,19 +916,36 @@ def _scan(carry):
     print(f"\n分析完成，共 {len(items)} 筆" + (f"（另有前次未完成 {len(carry)} 筆）" if carry else "")
           + "，等 07:00 送出")
 
+_B_TAG = re.compile(r'&lt;(/?)b&gt;', re.I)
+
+def ai_html_to_telegram(text):
+    """AI 的 display_text 轉成 Telegram HTML 一定解析得了的字串：只留成對、沒交錯的 <b></b>。
+    Telegram parse_mode=HTML 只要出現一個裸的 & 或 <（「營收&獲利」「EPS<0」）或沒閉合的標籤，
+    整則就 400 拒收。prompt 雖然禁止，但不能只靠 AI 守規矩"""
+    text = re.sub(r'<br\s*/?>', '\n', text or '', flags=re.I)                   # prompt 禁用但 AI 偶爾會給
+    text = re.sub(r'</?(?![bB]>)[a-zA-Z][a-zA-Z0-9]*(\s[^<>]*)?>', '', text)        # <p>、<ul> 等其他標籤直接拿掉
+    text = html_escape(html.unescape(text), quote=False)                           # AI 自己寫的 &amp; 先還原，避免跳脫兩次
+    text = _B_TAG.sub(lambda m: f"<{m.group(1)}b>", text)
+    depth = 0
+    for m in re.finditer(r'<(/?)b>', text):
+        depth += -1 if m.group(1) else 1
+        if depth not in (0, 1):
+            break
+    if depth != 0:
+        # 漏打閉合、多打閉合或巢狀：寧可拿掉粗體也要送得出去
+        text = re.sub(r'</?b>', '', text)
+    return text
+
 def _render_block(item):
     ann, ai = item["ann"], item["ai"]
-    code, price, volume_lots = ann['公司代號'], item["price"], item["volume_lots"]
-    display_text = ai.get('display_text', '')
-    if display_text.count('<b>') != display_text.count('</b>'):
-        # AI 偶爾漏打閉合標籤，標籤沒配對會讓 Telegram HTML 解析整則失敗，寧可拿掉粗體也要送得出去
-        display_text = display_text.replace('<b>', '').replace('</b>', '')
-    return (f"📢【{ann['公司名稱']}｜{code}】\n"
-            f"📅 {ann['發言日期']} {ann['發言時間']}\n"
-            f"📑 {ann['符合條款']}\n"
-            f"💰 收盤價: {price} | 成交量: {volume_lots if volume_lots is not None else '無資料'}\n\n"
+    e = lambda v: html_escape(str(v), quote=False)
+    volume_lots = item["volume_lots"]
+    return (f"📢【{e(ann['公司名稱'])}｜{e(ann['公司代號'])}】\n"
+            f"📅 {e(ann['發言日期'])} {e(ann['發言時間'])}\n"
+            f"📑 {e(ann['符合條款'])}\n"
+            f"💰 收盤價: {e(item['price'])} | 成交量: {e(volume_lots) if volume_lots is not None else '無資料'}\n\n"
             f"🤖 <b>AI 分析：</b>\n"
-            f"{display_text}")
+            f"{ai_html_to_telegram(ai.get('display_text', ''))}")
 
 def _sync_sheets(cache):
     for item in cache.get("items", []):
