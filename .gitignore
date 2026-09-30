@@ -16,3 +16,6 @@ pending_results.tmp
 
 # send 記錄「今天已處理過 cache」的日期
 .last_sent
+
+# pytest
+.pytest_cache/

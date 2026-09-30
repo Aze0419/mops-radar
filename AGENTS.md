@@ -7,6 +7,19 @@ TWSE/TPEX 收盤價寫回 Supabase `stock_prices`（`fetch_prices.py`，因子�
 
 （原始檔／可編輯版本：[docs/architecture.html](docs/architecture.html)）
 
+## 測試
+
+改 `mops_radar.py` 前後都跑一次（本機；Hermes 的 venv 沒裝 pytest，也不要裝進去——Hermes 自動更新會重建那顆 venv）：
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+- 全部離線：`tests/conftest.py` 會在 import 前把金鑰蓋成假值，並擋掉所有 `urlopen`，沒 mock 到的路徑會直接失敗（Hermes 上的 `.env` 是真金鑰，寧可測試失敗也不能真的送出 Telegram）。
+- `tests/fixtures/mops_eps_announcements.json` 是 22 則人工逐則核對過的真實公告（2026-09 的 09/09、09/10、09/25、09/26、09/29），正確答案在 `tests/jev_live_check.py` 的 `TRUTH`。
+- 改 `jev_questions()`、`number_candidates()`、`JEV_MIN_CONF` 這類會影響 Jev 抽取的東西，要真打 Jev 對答案：本機有金鑰用 `python -m pytest --live`；在 Hermes 上直接跑 `cd ~/mops_radar && /Users/iroman/.hermes/hermes-agent/venv/bin/python3 tests/jev_live_check.py`（不需要 pytest，只打 Jev，其他金鑰會先蓋成假值）。
+
 ## 陷阱
 
 - **這個目錄（本機 git clone）是 `fetch_prices.py` 與 `mops_radar.py` 唯一的執行位置，GDrive 那份已退役。**
