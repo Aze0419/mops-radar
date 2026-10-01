@@ -64,6 +64,18 @@ def test_percent_sign_candidates_unchanged(m):
     assert {"1.22", "0.43", "678.72", "404.68"} <= amounts, "「去年同月」金額欄不是百分比"
 
 
+def regex_fin(m, code):
+    r = m.regex_financials(announcement(code)["說明"])
+    return tuple(r[k] for k in ("m_eps", "q_eps", "m_yoy", "m_rev", "r_yoy"))
+
+
+def test_regex_fallback_reads_yoy_from_percent_header(m):
+    # 高力：以前單季 EPS 拿到年增率 44.27、兩個年增率都 None
+    assert regex_fin(m, "8996") == (1.35, 2.16, 44.27, 1204.0, 112.84)
+    # 帶 % 的表照舊
+    assert regex_fin(m, "6861") == (0.76, 2.33, 153.0, 284.0, 53.0)
+
+
 def test_cumulative_column_rejected_by_code(m):
     tokens = {"#1 0.54": ("0.54", "累計"), "#2 0.16": ("0.16", "08月(單位仟元)"),
               "#3 20.60": ("20.60", "114年第3季至115年第2季 最近四季累計")}

@@ -221,31 +221,28 @@ def _parse_num(s):
 def regex_financials(detail):
     """舊的規則式抽取，只剩 Jev 不可用時的備援。
     只有「注意交易資訊」那種固定表格抓得對；自結損益的自由文字（金融股居多）會把
-    累計 EPS 當單月、或從主旨裡的「每股盈餘」開始抓到淨利（遠東銀 462717）。"""
-    nums, pcts = [], []
-    block = re.search(r'每股盈餘[\s\S]*', detail)
-    if block:
-        for m in re.finditer(r'[（(]?-?\d+[\d,]*\.?\d*[)）]?(%)?', block.group()):
-            raw = m.group()
-            v = _parse_num(raw.replace('%', ''))
-            if v is not None:
-                (pcts if m.group(1) else nums).append(v)
+    累計 EPS 當單月、或從主旨裡的「每股盈餘」開始抓到淨利（遠東銀 462717）。
+    百分比跟 Jev 候選一樣用 _is_pct() 判斷：表頭寫 (%) 的年增率欄（高力）數字本身沒有 %，
+    以前會被當成金額，單季 EPS 拿到年增率、年增率變 None。"""
+    def split_from(keyword):
+        nums, pcts = [], []
+        block = re.search(keyword, detail)
+        if block:
+            for m in re.compile(r'[（(]?-?\d+[\d,]*\.?\d*[)）]?%?').finditer(detail, block.start()):
+                v = _parse_num(m.group().replace('%', ''))
+                if v is not None:
+                    is_pct = _is_pct(m.group(), _table_header(detail, m.start(), m.end()))
+                    (pcts if is_pct else nums).append(v)
+        return nums, pcts
 
+    nums, pcts = split_from(r'每股盈餘')
     m_eps = nums[0] if len(nums) > 0 else None
     q_eps = nums[1] if len(nums) > 1 else None
     m_yoy = pcts[0] if len(pcts) > 0 else None
 
-    m_rev, r_yoy = None, None
-    rev_block = re.search(r'營業收入[\s\S]*', detail)
-    if rev_block:
-        rn, rp = [], []
-        for m2 in re.finditer(r'[（(]?-?\d+[\d,]*\.?\d*[)）]?(%)?', rev_block.group()):
-            raw = m2.group()
-            v = _parse_num(raw.replace('%', ''))
-            if v is not None:
-                (rp if m2.group(1) else rn).append(v)
-        m_rev = rn[0] if rn else None
-        r_yoy = rp[0] if rp else None
+    rn, rp = split_from(r'營業收入')
+    m_rev = rn[0] if rn else None
+    r_yoy = rp[0] if rp else None
 
     return {'m_eps': m_eps, 'm_yoy': m_yoy, 'q_eps': q_eps, 'm_rev': m_rev, 'r_yoy': r_yoy,
             'c_eps': None, 'c_months': None, 'source': 'regex'}
@@ -600,6 +597,13 @@ def _column_header(text, ls, start, end, max_lines=15):
             break  # 「(一)單月  115年8月 …」這種段落標題行本身可能就是表頭，收完就停
     return ' '.join(reversed(parts))
 
+def _table_header(text, start, end):
+    """text[start:end] 這個數字如果在表格欄位裡（前面一大段空白），回傳同一欄的標題；不是表格回空字串"""
+    ls = text.rfind('\n', 0, start) + 1
+    if re.search(r'[ \t　]{3,}$', text[ls:start]):
+        return _column_header(text, ls, start, end)
+    return ''
+
 def number_candidates(text):
     """回傳 [(候選標籤, 數字字串, 所在行標示)]，排除日期、條號、項次編號這些不是金額的數字"""
     out = []
@@ -617,11 +621,9 @@ def number_candidates(text):
         le = len(text) if le == -1 else le
         s, e = max(ls, m.start() - 80), min(le, m.end() + 80)
         line = (text[s:m.start()] + f"【{tok}】" + text[m.end():e]).strip()
-        header = ''
-        if re.search(r'[ \t　]{3,}$', text[ls:m.start()]):  # 前面一大段空白 = 表格欄位
-            header = _column_header(text, ls, m.start(), m.end())
-            if header:
-                line += f"｜同一欄上方標題：{header}"
+        header = _table_header(text, m.start(), m.end())
+        if header:
+            line += f"｜同一欄上方標題：{header}"
         out.append((f"#{len(out) + 1} {tok}", tok, line, header))
     return out
 
