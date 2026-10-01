@@ -17,7 +17,7 @@ python -m pytest
 ```
 
 - 全部離線：`tests/conftest.py` 會在 import 前把金鑰蓋成假值，並擋掉所有 `urlopen`，沒 mock 到的路徑會直接失敗（Hermes 上的 `.env` 是真金鑰，寧可測試失敗也不能真的送出 Telegram）。
-- `tests/fixtures/mops_eps_announcements.json` 是 22 則人工逐則核對過的真實公告（2026-09 的 09/09、09/10、09/25、09/26、09/29），正確答案在 `tests/jev_live_check.py` 的 `TRUTH`。
+- `tests/fixtures/mops_eps_announcements.json` 是 25 則人工逐則核對過的真實公告（2026-09 的 09/09、09/10、09/25、09/26、09/29、09/30），正確答案在 `tests/jev_live_check.py` 的 `TRUTH`（09/30 那 3 則另在 `YOY_TRUTH` 核對年增率）。
 - 改 `jev_questions()`、`number_candidates()`、`JEV_MIN_CONF` 這類會影響 Jev 抽取的東西，要真打 Jev 對答案：本機有金鑰用 `python -m pytest --live`；在 Hermes 上直接跑 `cd ~/mops_radar && /Users/iroman/.hermes/hermes-agent/venv/bin/python3 tests/jev_live_check.py`（不需要 pytest，只打 Jev，其他金鑰會先蓋成假值）。
 
 ## 陷阱
@@ -49,6 +49,7 @@ python -m pytest
 - **清單頁的說明就是全文，不要再加回詳細頁。** `ajax_t05st02` 每個 form 的隱藏欄位 `h?8` 跟「詳細資料」頁一字不差（2026-09-29 全天 243 則逐一比對）。舊版另外用 `t05sr01_1` 拿 SEQ_NO 抓詳細頁，但那頁不吃日期參數，scan 改到 00:30 後每天 0 筆、白印兩百多行「無詳細頁參數」，已整段移除。懷疑漏抓 EPS 時先查 `h?8` 有沒有被截斷。
 - **Jev 只負責「刪」，而且失敗一律放行。** scan 的關鍵字篩完後，對每筆問 TypeSafe Jev「是不是在公布自家獲利」，機率 < `JEV_THRESHOLD`（預設 0.2）才剔除，log 會印 `✂ 機率 代號 主旨`。沒 `TYPESAFE_API_KEY`、401、逾時都照樣放行，不能因為 Jev 掛掉漏訊號。門檻 0.2 是 2026-09-29 用 10 個交易日實測定的：面額變更／更正歷年財報 ≤ 0.06、真正的財務業務公告 ≥ 0.42。沒收到某檔訊號時，先 grep log 裡的 `✂` 看是不是被 Jev 剔掉。
 - **EPS／營收由 Jev 從公告數字裡「挑」，不是 regex 抓第一個數字。** 舊的 `regex_financials()`（找第一個「每股盈餘」往後取數字）只有「注意交易資訊」固定表格抓得對，自結損益的自由文字會出事：遠東銀主旨含「每股盈餘」抓到淨利 462717、華南金／彰銀／豐泰把 1~8 月累計 EPS 當單月 ×12、營收單位仟元被當百萬——本益比一錯，AI 照「系統預算值」評級就會亂給 🔴。現在 `jev_judge()` 跟獲利判斷同一個 request 問 6 題 Choice：程式先把公告每個數字列成候選（附所在行＋依顯示寬度對齊找到的同欄表頭），Jev 只能原樣挑一個或選「無」。三道把關：信心 < `JEV_MIN_CONF`（0.8）當沒資料；單月／單季 EPS 挑到的欄位表頭含「累計／四季」由程式硬擋（高雄銀「本月份」欄空白那種表，Jev 會高信心挑累計欄；另問一題「有沒有單月EPS」實測反而誤殺浩宇、漢達，已放棄）；Jev 失敗才退回 regex。2026-09-30 用 5 天 31 則人工核對：Jev 0 錯、regex 15 錯。log 的 `抽取（jev|regex）` 那行會印挑到的數字與各題信心，懷疑 EPS 錯先看這行。
+- **年增率候選看欄位表頭，不只看數字後面有沒有 %。** 程式把候選分成「金額」與「百分比」兩堆，年增率題只給百分比那堆。以前只認結尾帶 `%` 的數字，高力 115/09/30 的注意交易資訊表把 `(%)` 寫在表頭、數字本身是 `112.84`、`44.27`，百分比候選是空的，Jev 只能答「無」→ 兩個年增率都 None、還會觸發缺年增率降級。現在 `_is_pct()`：帶 `%`，或同欄表頭含「增減」（「增減金額」除外）就算百分比。log 抽取那行「年增 None%」但原文明明有年增率時，先看那一欄的表頭有沒有對齊到「增減」。regex 備援仍只認帶 `%` 的數字，這種表退回 regex 時年增率一樣抓不到、單季 EPS 還會誤拿到年增率。
 - **股價有日期檢查。** `fetch_prices()` 取 Supabase 最新一筆時連 `date` 一起讀，scan 用證交所休市日曆算出「今天之前最近的交易日」（`last_trading_day()`，日曆查不到只跳週末），股價比它舊就在 log 印 ⚠️、給 AI 的訊息註明「不是最新交易日的價格」、Telegram 收盤價那行後面加「⚠️ 這是 MM/DD 的收盤價，最新交易日應為 MM/DD」。常見原因是那天抓價失敗或個股停牌；颱風假不在日曆上，那天會全部誤報。
 - **股價與成交量一律查 Supabase `stock_prices`**，不要讓 AI 從公告內文自己編，也不要重新引入本機 json 快取。
 - **python 一律寫死 hermes-agent venv：`/Users/iroman/.hermes/hermes-agent/venv/bin/python3`**（系統 `/usr/bin/python3` 缺 gspread/supabase）。**不要**再加 `export PYTHONPATH="$HOME/Library/Python/3.9/lib/python/site-packages..."` 借舊套件：Hermes 背景自動更新會重建這顆 venv（2026-09-06 從 3.9 換成 3.11），借來的 cp39 `pydantic_core` 會讓 Supabase 讀取悄悄失敗、股價全變 0。

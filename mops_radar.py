@@ -630,10 +630,15 @@ def _pick(instructions, cands, none_desc):
     criteria[JEV_NONE] = none_desc
     return {"type": "choice", "instructions": instructions, "criteria": criteria}
 
+# 數字本身沒有 %、但所在欄位標題是「增減」：高力 115/09/30 注意交易資訊表把 (%) 寫在表頭，
+# 112.84、44.27 以前被當成金額，年增率候選是空的，Jev 只能答「無」。「增減金額」欄才是金額
+def _is_pct(tok, header):
+    return tok.endswith('%') or (re.search(r'增減', header) and not re.search(r'金額', header))
+
 def jev_questions(desc):
     cands = number_candidates(desc)
-    amounts = [c for c in cands if not c[1].endswith('%')]
-    pcts = [c for c in cands if c[1].endswith('%')]
+    amounts = [c for c in cands if not _is_pct(c[1], c[3])]
+    pcts = [c for c in cands if _is_pct(c[1], c[3])]
     self_note = "只看公司本身（合併或母公司）的數字；子公司的數字、去年同期的金額、累計或最近四季的數字都不算。"
     yoy_note = "只看公司本身（合併或母公司）；累計、單季或子公司的增減百分比都不算。"
     questions = {

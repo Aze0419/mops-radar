@@ -43,6 +43,27 @@ def test_dates_and_item_numbers_are_not_candidates(m):
     assert "1" not in toks and "5" not in toks, "「1.事實發生日」「5.發生緣由」的項次不該變候選"
 
 
+def candidate_toks(m, code):
+    """(百分比候選, 金額候選) 的數字字串集合"""
+    questions, _ = m.jev_questions(announcement(code)["說明"][:m.JEV_DESC_LIMIT])
+    toks = lambda q: {label.split(" ", 1)[1] for label in questions[q]["criteria"] if label != m.JEV_NONE}
+    return toks("m_yoy"), toks("m_eps")
+
+
+def test_yoy_column_without_percent_sign_is_percentage_candidate(m):
+    # 高力 2026-09-30：表頭寫「與去年同期增減 (%)」，數字本身沒有 %（112.84、44.27），以前兩個年增率都抓成 None
+    pcts, amounts = candidate_toks(m, "8996")
+    assert {"112.84", "44.27", "54.92", "61.19"} <= pcts
+    assert not {"112.84", "44.27"} & amounts, "年增率不該混進 EPS／營收金額的候選"
+    assert {"1.35", "2.16", "1,204"} <= amounts and not {"1.35", "1,204"} & pcts
+
+
+def test_percent_sign_candidates_unchanged(m):
+    pcts, amounts = candidate_toks(m, "7792")
+    assert {"184.18%", "67.72%"} <= pcts
+    assert {"1.22", "0.43", "678.72", "404.68"} <= amounts, "「去年同月」金額欄不是百分比"
+
+
 def test_cumulative_column_rejected_by_code(m):
     tokens = {"#1 0.54": ("0.54", "累計"), "#2 0.16": ("0.16", "08月(單位仟元)"),
               "#3 20.60": ("20.60", "114年第3季至115年第2季 最近四季累計")}

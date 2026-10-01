@@ -76,7 +76,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-測試全部離線，會擋掉所有對外連線（Hermes 上的 `.env` 是真金鑰，寧可測試失敗也不能真的送出訊息）。`tests/fixtures/` 有 22 則人工核對過的真實公告，改 Jev 題目或門檻時在 Hermes 上跑一次真打 Jev 的驗證：
+測試全部離線，會擋掉所有對外連線（Hermes 上的 `.env` 是真金鑰，寧可測試失敗也不能真的送出訊息）。`tests/fixtures/` 有 25 則人工核對過的真實公告，改 Jev 題目或門檻時在 Hermes 上跑一次真打 Jev 的驗證：
 
 ```bash
 cd ~/mops_radar && /Users/iroman/.hermes/hermes-agent/venv/bin/python3 tests/jev_live_check.py
