@@ -59,7 +59,17 @@ python mops_radar.py send     # 送出 pending_results.json（沒帶參數預設
 python fetch_prices.py        # 抓上市＋上櫃收盤價
 python fetch_prices.py --tse-only
 python fetch_prices.py --backfill-otc 2026-08-11 2026-08-17   # 補上櫃歷史缺口
+python build_dashboard.py     # 重建 Sheet「績效儀表板」（平常不用跑，見下方）
 ```
+
+## 績效儀表板
+
+Google Sheet 的「績效儀表板」分頁追蹤「歷史紀錄」每筆進場的績效：KPI、策略因子成效（含盈虧比、獲利因子、0050 基準）、因子疊加、月份趨勢，以及平均報酬率、勝率兩張長條圖。版面照因子選股試算表的績效儀表板。
+
+- **全部是公式，自動即時更新**，不用按按鈕也不用排程。資料直接讀「歷史紀錄」，現價來自 `TW_PRICE`，0050 起始價來自 `GOOGLEFINANCE`。計算過程在隱藏分頁「儀表板計算」。
+- **因子＝「歷史紀錄」H 欄**，用「、」或句點分隔。「董事長202607」「董事長增持(張)」會合併成「董事長增持」，「飆股雷達MM/DD」會合併成「飆股雷達」。H 欄空白的列歸在「未標註因子」。
+- 進場日（G 欄）當天顯示「待收盤」，隔天起才算進勝率與報酬。
+- `build_dashboard.py` 會整頁重寫「績效儀表板」與「儀表板計算」，其他分頁不動。只有要改版面、改算法，或分頁被弄壞時才需要跑。要改公式請改這支程式再重跑，不要直接在 Sheet 上改。本機沒有 `google-sa.json` 時，可以用 `SA_KEY_FILE` 指向其他已共用這份試算表的 service account 金鑰（例如因子選股的 `google_service_account.json`）。
 
 ## 部署
 
@@ -87,6 +97,7 @@ cd ~/mops_radar && /Users/iroman/.hermes/hermes-agent/venv/bin/python3 tests/jev
 ```
 mops_radar.py        scan／send 主程式
 fetch_prices.py      每日收盤價 → Supabase stock_prices
+build_dashboard.py   重建 Google Sheet「績效儀表板」（公式版，平常不用跑）
 hermes/scripts/      Hermes cron 呼叫的包裝腳本（部署時複製到 ~/.hermes/scripts/）
 hermes/skills/       Hermes skill 說明
 tests/               pytest 與 Jev live 驗證
