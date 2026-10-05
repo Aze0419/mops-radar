@@ -868,8 +868,8 @@ def _get_history_ws():
 _SHEET_EPOCH = datetime(1899, 12, 30, tzinfo=TZ).date()
 
 def sync_history(ann, price):
-    """強烈買進才記一筆：A股號、F股價、G日期(序列值)、H來源標註(飆股雷達MM/DD) 寫靜態值；B/C/D/E（股名/漲跌/漲跌%/即時股價）從上一列複製公式，
-    不能寫死，否則會蓋掉 VLOOKUP／TW_PRICE 這些即時公式。同日同股票已存在就跳過。"""
+    """強烈買進才記一筆：A股號、F股價、G日期(序列值)、H來源標註(飆股雷達MM/DD) 寫靜態值；B/C/D/E（股名/漲跌/漲跌%/現價）從上一列複製公式，
+    不能寫死，否則會蓋掉這些即時公式（E 欄是 VLOOKUP「收盤價」分頁、查不到才 TW_PRICE）。同日同股票已存在就跳過。"""
     ws = _get_history_ws()
     code = ann['公司代號']
     code_val = int(code) if code.isdigit() else code

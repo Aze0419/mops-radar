@@ -19,6 +19,12 @@ if _env.exists():
 TZ         = ZoneInfo("Asia/Taipei")
 CACHE_FILE = Path(__file__).parent / "prices.json"
 
+# 飆股雷達試算表的隱藏分頁「收盤價」：「歷史紀錄」E 欄用 VLOOKUP 查這裡（查不到才退回 TW_PRICE 抓 Yahoo）
+RADAR_SHEET_ID = os.environ.get("RADAR_SHEET_ID", "1UulUtCjGbBUk_36xCK7TuRSrEvBFCCr7okKWBlJBvuc")
+SA_KEY_FILE    = os.environ.get("SA_KEY_FILE", str(Path(__file__).parent / "google-sa.json"))
+CLOSE_TAB      = "收盤價"
+CLOSE_HEAD     = ["代號", "收盤價", "日期"]
+
 RETRY_INTERVAL = 300      # 資料還沒發布時，隔幾秒再試一次（TWSE 建議別打太密）
 RETRY_UNTIL    = (16, 0) # 最晚重試到這個時間點（台北時區），避免卡住整個排程
 REQUEST_GAP    = 3        # 每次對外請求之間至少停頓幾秒，降低碰到流量限制的機率
@@ -310,6 +316,47 @@ def refresh_factor_selection_latest(client):
             else:
                 print(f"  refresh_factor_selection_latest 失敗（重試過一次）：{e}")
 
+def close_sheet_rows(existing, d, prices):
+    """「收盤價」分頁的舊內容＋這次抓到的收盤價 → 整頁要寫回的列（含表頭）。
+
+    依代號合併，不是整頁換掉：14:15 的 --tse-only 只有上市，上櫃要保留前一天的收盤價，
+    否則上櫃股票會整排查不到、退回 Yahoo。代號照「歷史紀錄」A 欄的寫法（mops_radar.py
+    sync_history）：純數字存成數字，0 開頭（0050）存成文字，VLOOKUP 型別才對得上。
+    """
+    merged = {}
+    for r in existing[1:]:
+        if len(r) >= 3 and str(r[0]).strip():
+            merged[str(r[0]).strip()] = [r[1], r[2]]
+    for code, p in prices.items():
+        merged[code] = [p["close"], d.strftime("%Y-%m-%d")]
+    return [CLOSE_HEAD] + [[int(c) if re.fullmatch(r"[1-9]\d*", c) else c, v[0], v[1]]
+                           for c, v in sorted(merged.items())]
+
+def sync_close_sheet(d, prices):
+    """收盤價寫進飆股雷達試算表的隱藏分頁「收盤價」，「歷史紀錄」E 欄的現價就會跟著更新。
+    以前 E 欄直接用 TW_PRICE（Apps Script 一格一格抓 Yahoo），自訂函式的結果會被快取、
+    不保證收盤後重算，而且 Yahoo 抓失敗回 0，儀表板會算成 -100%。失敗只印訊息，不能拖垮抓價本身。
+    """
+    if not prices:
+        return
+    try:
+        import gspread
+        ss = gspread.service_account(filename=SA_KEY_FILE).open_by_key(RADAR_SHEET_ID)
+        try:
+            ws = ss.worksheet(CLOSE_TAB)
+        except gspread.WorksheetNotFound:
+            ws = ss.add_worksheet(CLOSE_TAB, rows=3000, cols=len(CLOSE_HEAD))
+            ss.batch_update({"requests": [{"updateSheetProperties": {
+                "properties": {"sheetId": ws.id, "hidden": True}, "fields": "hidden"}}]})
+        rows = close_sheet_rows(ws.get("A:C", value_render_option="UNFORMATTED_VALUE"), d, prices)
+        if ws.row_count < len(rows):
+            ws.add_rows(len(rows) - ws.row_count)
+        # 用具名參數：gspread 5 是 update(range_name, values)、6 改成 update(values, range_name)
+        ws.update(range_name=f"A1:C{len(rows)}", values=rows, value_input_option="RAW")
+        print(f"  ✅ 飆股雷達「{CLOSE_TAB}」分頁更新 {len(prices)} 筆（共 {len(rows) - 1} 檔）")
+    except Exception as e:
+        print(f"  飆股雷達「{CLOSE_TAB}」分頁更新失敗：{e}")
+
 def main(tse_only=False):
     d = smart_date()
     print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] 抓取 {d.strftime('%Y-%m-%d')} 收盤價")
@@ -348,6 +395,9 @@ def main(tse_only=False):
         upsert_supabase(d, prices)
     except Exception as e:
         print(f"  Supabase 回寫失敗：{e}")
+
+    # 不靠 Supabase：ETF（0050）不在 stock_prices 白名單，這裡直接用抓到的全市場價格
+    sync_close_sheet(d, prices)
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--backfill-otc":
